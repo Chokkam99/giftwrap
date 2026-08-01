@@ -1,7 +1,0 @@
-fastapi
-uvicorn[standard]
-anthropic
-httpx
-playwright
-python-dotenv
-pytest
