@@ -1,0 +1,432 @@
+:root {
+  --accent: #6d28d9;
+  --accent-light: #ede9fe;
+  --bg: #f4f4f7;
+  --surface: #ffffff;
+  --text: #1f2430;
+  --text-muted: #6b7280;
+  --border: #e5e7eb;
+  --success: #16a34a;
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.04);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.10);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+/* Header */
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  z-index: 2;
+}
+
+.app-header-titles h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.budget-chip {
+  flex-shrink: 0;
+  background: var(--accent-light);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* Chat log */
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.msg-row {
+  display: flex;
+  width: 100%;
+}
+
+.msg-row.buyer {
+  justify-content: flex-end;
+}
+
+.msg-row.agent {
+  justify-content: flex-start;
+}
+
+.msg-group {
+  max-width: 84%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msg-bubble {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  line-height: 1.45;
+  font-size: 15px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  box-shadow: var(--shadow);
+}
+
+.msg-row.buyer .msg-bubble {
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.msg-row.agent .msg-bubble {
+  background: var(--surface);
+  color: var(--text);
+  border-bottom-left-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* Typing indicator */
+.typing-indicator {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 0 20px 10px;
+}
+
+.typing-indicator .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  opacity: 0.4;
+  animation: blink 1.2s infinite;
+}
+
+.typing-indicator .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-indicator .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes blink {
+  0%, 80%, 100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+/* Input row */
+.chat-input-row {
+  display: flex;
+  gap: 10px;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+#chat-input {
+  flex: 1;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 15px;
+  outline: none;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#chat-input:focus {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+#send-btn {
+  padding: 12px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+#send-btn:hover {
+  opacity: 0.9;
+}
+
+#send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Product cards */
+.card-row {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scroll-snap-type: x proximity;
+}
+
+.product-card {
+  flex: 0 0 auto;
+  width: 190px;
+  scroll-snap-align: start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+}
+
+.product-card-image {
+  width: 100%;
+  height: 130px;
+  object-fit: cover;
+  background: var(--accent-light);
+  display: block;
+}
+
+.product-card-image-placeholder {
+  width: 100%;
+  height: 130px;
+  background: linear-gradient(135deg, var(--accent-light), #f5f3ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+}
+
+.product-card-body {
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+}
+
+.product-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  min-height: 34px;
+}
+
+.product-card-merchant {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-light);
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.product-card-price {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.product-card-btn {
+  margin-top: auto;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.product-card-btn:hover {
+  opacity: 0.9;
+}
+
+/* Action panels */
+.action-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 100%;
+}
+
+.action-panel-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.action-panel-desc {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.action-panel-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.btn {
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-secondary {
+  background: var(--accent-light);
+  color: var(--accent);
+}
+
+.btn:hover {
+  opacity: 0.9;
+}
+
+/* Receipt card */
+.receipt-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 22px 20px;
+  box-shadow: var(--shadow-md);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+}
+
+.receipt-checkmark {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #dcfce7;
+  color: var(--success);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 30px;
+  margin-bottom: 6px;
+}
+
+.receipt-title {
+  font-weight: 700;
+  font-size: 16px;
+}
+
+.receipt-row {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  padding: 3px 0;
+}
+
+.receipt-row span:last-child {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.receipt-footer {
+  margin-top: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* Mobile */
+@media (max-width: 480px) {
+  .app-header {
+    padding: 12px 14px;
+  }
+
+  .app-header-titles h1 {
+    font-size: 17px;
+  }
+
+  .chat-log {
+    padding: 14px;
+  }
+
+  .chat-input-row {
+    padding: 10px 12px;
+  }
+
+  .msg-group {
+    max-width: 92%;
+  }
+
+  .product-card {
+    width: 160px;
+  }
+}

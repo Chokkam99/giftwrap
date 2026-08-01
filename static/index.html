@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Agentic Gifting</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-header-titles">
+        <h1>Agentic Gifting</h1>
+        <p class="subtitle">Powered by Prava — budget-locked, merchant-scoped</p>
+      </div>
+      <div id="budget-chip" class="budget-chip" hidden>
+        Budget: <span id="budget-amount">—</span>
+      </div>
+    </header>
+
+    <main id="chat-log" class="chat-log" aria-live="polite"></main>
+
+    <div id="typing-indicator" class="typing-indicator" hidden>
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+
+    <form id="chat-form" class="chat-input-row" autocomplete="off">
+      <input
+        id="chat-input"
+        type="text"
+        placeholder="Ask for a gift idea…"
+        aria-label="Message"
+        autocomplete="off"
+      />
+      <button id="send-btn" type="submit">Send</button>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
