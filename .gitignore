@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# System
+.DS_Store
+
+# Node
+node_modules/
+
+# Playwright
+playwright-report/
+test-results/
+
+# Logs
+*.log
+
+# Pytest
+.pytest_cache/
