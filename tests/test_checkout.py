@@ -33,11 +33,14 @@ from checkout.playwright_checkout import (  # noqa: E402
     host_of,
     is_confirmation_url,
     is_dev_store_host,
+    locale_for,
     looks_confirmed,
     mask_pan,
+    resolve_address_country,
     resolve_headless,
     resolve_product_url,
     shipping_address,
+    shipping_profile,
 )
 
 DEV_PRODUCT_URL = "https://gifting-demo.myshopify.com/products/silver-pendant"
@@ -318,6 +321,68 @@ def test_shipping_address_env_and_argument_overrides():
 
 
 # --------------------------------------------------------------------------
+# region-aware shipping profiles (US dev store)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env,expected",
+    [
+        ({}, "IN"),
+        ({"CHECKOUT_ADDRESS_COUNTRY": "US"}, "US"),
+        ({"CHECKOUT_ADDRESS_COUNTRY": "us"}, "US"),
+        ({"CHECKOUT_ADDRESS_COUNTRY": " us "}, "US"),
+        ({"CHECKOUT_ADDRESS_COUNTRY": "ZZ"}, "IN"),  # unknown -> default
+        ({"CHECKOUT_ADDRESS_COUNTRY": ""}, "IN"),
+    ],
+)
+def test_resolve_address_country(env, expected):
+    assert resolve_address_country(env=env) == expected
+
+
+def test_resolve_address_country_argument_wins():
+    assert resolve_address_country("US", env={"CHECKOUT_ADDRESS_COUNTRY": "IN"}) == "US"
+
+
+def test_shipping_profile_us_is_a_valid_us_address():
+    address = shipping_profile("US", env={})
+    assert address["country_code"] == "US"
+    assert address["province_code"] == "CA"
+    assert address["city"] == "San Francisco"
+    assert address["zip"] == "94104"
+    assert address["phone"].startswith("+1")
+    assert address is not DEFAULT_SHIPPING
+
+
+def test_shipping_profile_returns_a_copy():
+    first = shipping_profile("US", env={})
+    first["city"] = "Mutated"
+    assert shipping_profile("US", env={})["city"] == "San Francisco"
+
+
+def test_shipping_address_follows_country_env():
+    address = shipping_address(env={"CHECKOUT_ADDRESS_COUNTRY": "US"})
+    assert address["country_code"] == "US"
+    assert address["city"] == "San Francisco"
+
+
+def test_shipping_address_field_overrides_apply_on_top_of_us_profile():
+    address = shipping_address(
+        env={"CHECKOUT_ADDRESS_COUNTRY": "US", "CHECKOUT_SHIP_CITY": "Oakland"}
+    )
+    assert address["city"] == "Oakland"
+    assert address["province_code"] == "CA"
+    assert address["country_code"] == "US"
+
+
+@pytest.mark.parametrize(
+    "code,expected", [("US", "en-US"), ("IN", "en-IN"), ("", "en-US"), ("ZZ", "en-US")]
+)
+def test_locale_for_follows_country(code, expected):
+    assert locale_for({"country_code": code}) == expected
+
+
+# --------------------------------------------------------------------------
 # card handling
 # --------------------------------------------------------------------------
 
@@ -421,6 +486,90 @@ def test_assert_purchase_allowed_allows_custom_host_with_override():
 
 
 # --------------------------------------------------------------------------
+# dry-run safety: the Pay button must never be reached
+# --------------------------------------------------------------------------
+
+
+class _FakePage:
+    url = "https://gifting-demo.myshopify.com/checkouts/c/tok"
+
+    def __getattr__(self, _name):  # every page call is a harmless no-op
+        return lambda *a, **k: None
+
+
+def _stub_browser_flow(monkeypatch, calls):
+    """Replace Playwright and every DOM step so only the flow logic runs."""
+    import checkout.playwright_checkout as mod
+
+    noop = lambda *a, **k: None  # noqa: E731
+    monkeypatch.setattr(mod, "_import_playwright", lambda: object())
+
+    class _Ctx:
+        def new_page(self):
+            return _FakePage()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        mod,
+        "_launch",
+        lambda *a, **k: (type("M", (), {"stop": noop})(), type("B", (), {"close": noop})(), _Ctx()),
+    )
+    for name in (
+        "_open_product_page",
+        "_add_to_cart",
+        "_go_to_checkout",
+        "_fill_contact",
+        "_fill_shipping",
+        "_select_shipping_method",
+        "_advance_to_payment",
+        "_fill_payment",
+        "_screenshot",
+    ):
+        monkeypatch.setattr(mod, name, lambda *a, **k: calls.append("step"))
+    monkeypatch.setattr(mod, "_submit_payment", lambda *a, **k: calls.append("PAID"))
+    monkeypatch.setattr(
+        mod,
+        "_await_outcome",
+        lambda *a, **k: build_result(STATUS_APPROVED, "ok", order_id="1001"),
+    )
+    return mod
+
+
+def test_dry_run_never_submits_payment(monkeypatch):
+    calls = []
+    mod = _stub_browser_flow(monkeypatch, calls)
+    result = mod.run_shopify_checkout(
+        token="4111111111111111",
+        dynamic_cvv="123",
+        expiry_month=12,
+        expiry_year=2029,
+        product_url=DEV_PRODUCT_URL,
+        dry_run=True,
+    )
+    assert "PAID" not in calls
+    assert result.status == STATUS_FAILED
+    assert result.order_id is None
+    assert "dry_run_stopped_before_pay" in result.details["steps"]
+
+
+def test_non_dry_run_does_submit_payment(monkeypatch):
+    calls = []
+    mod = _stub_browser_flow(monkeypatch, calls)
+    result = mod.run_shopify_checkout(
+        token="4111111111111111",
+        dynamic_cvv="123",
+        expiry_month=12,
+        expiry_year=2029,
+        product_url=DEV_PRODUCT_URL,
+        dry_run=False,
+    )
+    assert "PAID" in calls
+    assert result.status == STATUS_APPROVED
+
+
+# --------------------------------------------------------------------------
 # smoke CLI argument safety (no browser involved)
 # --------------------------------------------------------------------------
 
@@ -467,8 +616,19 @@ def test_smoke_parser_accepts_documented_flags():
             "--month", "12",
             "--year", "2027",
             "--headed",
+            "--country", "US",
+            "--dry-run",
         ]
     )
     assert args.product_url == DEV_PRODUCT_URL
     assert args.headed is True
+    assert args.country == "US"
+    assert args.dry_run is True
     assert args.verify_store is False
+
+
+def test_smoke_country_defaults_to_none_and_rejects_unknown_regions():
+    smoke = _load_smoke_module()
+    assert smoke.build_parser().parse_args([]).country is None
+    with pytest.raises(SystemExit):
+        smoke.build_parser().parse_args(["--country", "ZZ"])

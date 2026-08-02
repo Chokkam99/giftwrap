@@ -14,6 +14,25 @@ Public surface:
     verify_store(...)         -> dict              # read-only store probe
     CheckoutResult, CheckoutError
 
+Environment knobs:
+    SHOPIFY_DEV_STORE_PRODUCT_URL  dev-store product page to buy.
+    SHOPIFY_STOREFRONT_PASSWORD    password for a gated dev storefront.
+    CHECKOUT_HEADLESS              0 to watch the browser (default headless).
+    CHECKOUT_ADDRESS_COUNTRY       IN (default) or US -- picks the shipping
+                                   profile AND the browser locale. A US-region
+                                   store rejects the Indian default address.
+    CHECKOUT_SHIP_*                per-field address overrides (CHECKOUT_SHIP_CITY, ...).
+    CHECKOUT_ARTIFACT_DIR          where screenshots are written.
+    CHECKOUT_ALLOW_ANY_HOST        1 to allow a non-myshopify.com dev store.
+    BOGUS_GATEWAY                  gateway *simulation*: "1" approves, "2"
+                                   fails, "3" errors; any other truthy value
+                                   means "1". When set, that single digit is
+                                   typed instead of the Prava token, so the
+                                   real card is never exercised -- the result
+                                   records ``details["bogus_gateway"] = True``
+                                   and the smoke CLI prints a [warn] line.
+                                   Unset/"0"/blank disables it (real token).
+
 Everything above the "browser automation" banner is pure logic with no
 Playwright dependency, so it can be unit-tested without a browser.
 """
@@ -45,6 +64,9 @@ __all__ = [
     "extract_order_id",
     "detect_decline",
     "mask_pan",
+    "shipping_address",
+    "shipping_profile",
+    "resolve_address_country",
 ]
 
 
@@ -439,25 +461,66 @@ def classify_outcome(url: str, body_text: str) -> CheckoutResult:
 # Pure logic: shipping address
 # ---------------------------------------------------------------------------
 
-DEFAULT_SHIPPING = {
-    "first_name": "Aarav",
-    "last_name": "Sharma",
-    "address1": "12 MG Road, Shanthala Nagar",
-    "address2": "",
-    "city": "Bengaluru",
-    "province": "Karnataka",
-    "province_code": "KA",
-    "zip": "560001",
-    "country": "India",
-    "country_code": "IN",
-    "phone": "+919876543210",
+ENV_ADDRESS_COUNTRY = "CHECKOUT_ADDRESS_COUNTRY"
+
+# A checkout only accepts an address from a region the store ships to, so the
+# default address has to follow the store. Our US-region dev store rejects the
+# Indian default outright ("Enter a valid ZIP code" / no shipping rates), hence
+# one ready-made profile per region selected by CHECKOUT_ADDRESS_COUNTRY.
+SHIPPING_PROFILES = {
+    "IN": {
+        "first_name": "Aarav",
+        "last_name": "Sharma",
+        "address1": "12 MG Road, Shanthala Nagar",
+        "address2": "",
+        "city": "Bengaluru",
+        "province": "Karnataka",
+        "province_code": "KA",
+        "zip": "560001",
+        "country": "India",
+        "country_code": "IN",
+        "phone": "+919876543210",
+    },
+    "US": {
+        "first_name": "Aarav",
+        "last_name": "Sharma",
+        "address1": "548 Market St",
+        "address2": "",
+        "city": "San Francisco",
+        "province": "California",
+        "province_code": "CA",
+        "zip": "94104",
+        "country": "United States",
+        "country_code": "US",
+        "phone": "+1 415 555 0100",
+    },
 }
+
+DEFAULT_ADDRESS_COUNTRY = "IN"
+DEFAULT_SHIPPING = SHIPPING_PROFILES[DEFAULT_ADDRESS_COUNTRY]
+
+# Browser locale per region; Shopify seeds the checkout's country field from it.
+LOCALE_BY_COUNTRY = {"IN": "en-IN", "US": "en-US"}
+
+
+def resolve_address_country(country: Optional[str] = None, env: Optional[dict] = None) -> str:
+    """Which shipping profile to use: argument, then env, then the default."""
+    source = env if env is not None else os.environ
+    raw = (country or source.get(ENV_ADDRESS_COUNTRY) or "").strip().upper()
+    if raw in SHIPPING_PROFILES:
+        return raw
+    return DEFAULT_ADDRESS_COUNTRY
+
+
+def shipping_profile(country: Optional[str] = None, env: Optional[dict] = None) -> dict:
+    """A copy of the region profile named by *country* / CHECKOUT_ADDRESS_COUNTRY."""
+    return dict(SHIPPING_PROFILES[resolve_address_country(country, env=env)])
 
 
 def shipping_address(overrides: Optional[dict] = None, env: Optional[dict] = None) -> dict:
-    """Default Indian shipping address, overridable via CHECKOUT_SHIP_* env."""
+    """Region profile (default India), overridable via CHECKOUT_SHIP_* env then args."""
     source = env if env is not None else os.environ
-    address = dict(DEFAULT_SHIPPING)
+    address = shipping_profile(env=env)
     for key in address:
         value = source.get(f"CHECKOUT_SHIP_{key.upper()}")
         if value:
@@ -465,6 +528,11 @@ def shipping_address(overrides: Optional[dict] = None, env: Optional[dict] = Non
     if overrides:
         address.update({k: v for k, v in overrides.items() if v is not None})
     return address
+
+
+def locale_for(address: dict) -> str:
+    """Browser locale matching the shipping country (falls back to en-US)."""
+    return LOCALE_BY_COUNTRY.get((address.get("country_code") or "").upper(), "en-US")
 
 
 # ---------------------------------------------------------------------------
@@ -519,57 +587,79 @@ EMAIL_SELECTORS = (
     'input[placeholder*="email" i]',
 )
 
+def exclude_autofill(selectors: Sequence[str]) -> tuple:
+    """Skip Shopify's hidden ``autofill_*`` decoy inputs.
+
+    The live one-page checkout renders a second, zero-size copy of every
+    address field (`#autofill_address1`, `#autofill_zone`, …) for browser
+    autofill. Typing into those is a silent no-op, so they are excluded by id
+    prefix rather than relied on being invisible.
+    """
+    return tuple(f"{selector}:not([id^='autofill'])" for selector in selectors)
+
+
 SHIPPING_SELECTORS = {
     "first_name": (
-        'input[autocomplete="given-name"]',
         'input[name="firstName"]',
+        'input[autocomplete*="given-name" i]',
         'input[name*="first_name" i]',
-        "input#TextField0",
     ),
     "last_name": (
-        'input[autocomplete="family-name"]',
         'input[name="lastName"]',
+        'input[autocomplete*="family-name" i]',
         'input[name*="last_name" i]',
     ),
     "address1": (
-        'input[autocomplete="address-line1"]',
         'input[name="address1"]',
+        'input[autocomplete*="address-line1" i]',
         'input[name*="address1" i]',
         'input[placeholder*="address" i]',
     ),
     "address2": (
-        'input[autocomplete="address-line2"]',
         'input[name="address2"]',
+        'input[autocomplete*="address-line2" i]',
         'input[name*="address2" i]',
     ),
     "city": (
-        'input[autocomplete="address-level2"]',
         'input[name="city"]',
+        'input[autocomplete*="address-level2" i]',
         'input[name*="city" i]',
     ),
     "zip": (
-        'input[autocomplete="postal-code"]',
         'input[name="postalCode"]',
+        'input[autocomplete*="postal-code" i]',
         'input[name*="zip" i]',
         'input[name*="postal" i]',
     ),
     "phone": (
         'input[autocomplete="tel"]',
+        'input[autocomplete*="tel" i]',
         'input[name="phone"]',
         'input[type="tel"]',
     ),
 }
+# The live checkout uses autocomplete="shipping given-name" etc., so the
+# tables above match on prefix/substring where needed.
+SHIPPING_SELECTORS = {
+    key: exclude_autofill(selectors) for key, selectors in SHIPPING_SELECTORS.items()
+}
 
-COUNTRY_SELECT_SELECTORS = (
-    'select[autocomplete="country"]',
-    'select[name="countryCode"]',
-    'select[name*="country" i]',
+COUNTRY_SELECT_SELECTORS = exclude_autofill(
+    (
+        'select[name="countryCode"]',
+        'select[autocomplete="country"]',
+        'select[autocomplete*="country" i]',
+        'select[name*="country" i]',
+    )
 )
-PROVINCE_SELECT_SELECTORS = (
-    'select[autocomplete="address-level1"]',
-    'select[name="zone"]',
-    'select[name*="province" i]',
-    'select[name*="state" i]',
+PROVINCE_SELECT_SELECTORS = exclude_autofill(
+    (
+        'select[name="zone"]',
+        'select[autocomplete="address-level1"]',
+        'select[autocomplete*="address-level1" i]',
+        'select[name*="province" i]',
+        'select[name*="state" i]',
+    )
 )
 
 CARD_NUMBER_SELECTORS = (
@@ -623,11 +713,44 @@ CARD_FRAME_HINTS = (
     "card_fields",
     "cardnumber",
     "card-number",
+    "checkout.pci.shopifyinc.com",
     "checkout.shopifycs.com",
     "stripe",
     "braintree",
     "hosted-field",
     "securefields",
+)
+
+# Shopify gives each card input its OWN iframe, but every one of those iframes
+# contains an inert copy of all the other inputs. Matching a field to its
+# frame by name is therefore the only reliable way in; the generic search is
+# kept as the fallback for single-frame and direct-input gateways.
+CARD_FIELD_FRAME_HINTS = {
+    "number": "card-fields-number",
+    "expiry": "card-fields-expiry",
+    "cvv": "card-fields-verification_value",
+    "name": "card-fields-name",
+}
+
+# Delivery/shipping-rate radios. The one-page checkout preselects the cheapest
+# rate once it has a valid address, but only after an async rate fetch, so we
+# wait for the group and select explicitly when nothing is checked. The live
+# dev store renders `name="shipping_methods"`; the rest cover other versions.
+SHIPPING_METHOD_SELECTORS = (
+    'input[type="radio"][name*="shipping_method" i]',
+    'input[type="radio"][name*="deliveryOptions" i]',
+    'input[type="radio"][name*="delivery-option" i]',
+    'input[type="radio"][name*="shipping_rate" i]',
+    'input[type="radio"][name*="shipping-rate" i]',
+    'input[type="radio"][name*="delivery" i]',
+)
+
+# Marketing consent, pre-ticked by Shopify. We opt out rather than sign the
+# order's contact address up for the dev store's newsletter.
+MARKETING_OPT_IN_SELECTORS = (
+    'input[type="checkbox"][name="marketing_opt_in"]',
+    "input#marketing_opt_in",
+    'input[type="checkbox"][name*="marketing" i]',
 )
 
 CONTINUE_SELECTORS = (
@@ -669,7 +792,7 @@ def _import_playwright():
     return sync_playwright
 
 
-def _launch(sync_playwright, headless: bool, timeout_ms: int):
+def _launch(sync_playwright, headless: bool, timeout_ms: int, locale: str = "en-US"):
     """Start Chromium; surface a CheckoutError if browsers were never installed."""
     manager = sync_playwright().start()
     try:
@@ -680,7 +803,7 @@ def _launch(sync_playwright, headless: bool, timeout_ms: int):
             f"Could not launch Chromium ({exc}). Run: playwright install chromium"
         ) from exc
     context = browser.new_context(
-        locale="en-IN",
+        locale=locale,
         viewport={"width": 1440, "height": 1000},
     )
     context.set_default_timeout(timeout_ms)
@@ -775,7 +898,124 @@ def _fill_anywhere(page, selectors: Iterable[str], value: str, timeout: int = SH
     return _type_into(locator, value)
 
 
+def _digits(value: str) -> str:
+    return re.sub(r"\D", "", value or "")
+
+
+def _type_card_value(locator, value: str) -> str:
+    """Type a card value with real keystrokes and return what stuck.
+
+    Shopify's card inputs are masked: ``fill()`` writes the raw string without
+    firing the formatter, so "1229" stays "1229" and the checkout rejects it
+    with "Enter a valid expiration date". Keystrokes let the mask do its job
+    ("12 / 29"). Verified against the live dev-store checkout.
+    """
+    try:
+        locator.click(timeout=SHORT_TIMEOUT_MS)
+    except Exception:
+        pass
+    try:
+        locator.press("Control+a")
+        locator.press("Meta+a")
+    except Exception:
+        pass
+    press = getattr(locator, "press_sequentially", None) or getattr(locator, "type", None)
+    if press is not None:
+        try:
+            press(value, delay=60)
+        except Exception:
+            pass
+    try:
+        current = locator.input_value(timeout=SHORT_TIMEOUT_MS)
+    except Exception:
+        current = ""
+    if _digits(current) == _digits(value):
+        return current
+    # Keystrokes did not land (or a mask rejected them): fall back to fill.
+    try:
+        locator.fill(value, timeout=SHORT_TIMEOUT_MS)
+        current = locator.input_value(timeout=SHORT_TIMEOUT_MS)
+    except Exception:
+        pass
+    return current
+
+
+def _card_scopes(page, frame_hint: Optional[str]) -> Iterator[Any]:
+    """Scopes for one card field: its own iframe first, then page, then rest."""
+    frames = [f for f in page.frames if f is not page.main_frame]
+    named = []
+    if frame_hint:
+        named = [
+            f
+            for f in frames
+            if frame_hint in ((getattr(f, "name", "") or "") + (getattr(f, "url", "") or ""))
+        ]
+    for frame in named:
+        yield frame
+    yield page
+    for frame in frames:
+        if frame not in named:
+            yield frame
+
+
+def _fill_card_field(page, field: str, selectors: Iterable[str], value: str) -> bool:
+    """Fill one card field inside the iframe that actually owns it."""
+    selectors = tuple(selectors)
+    hint = CARD_FIELD_FRAME_HINTS.get(field)
+    for index, scope in enumerate(_card_scopes(page, hint)):
+        locator = _find(scope, selectors, timeout=SHORT_TIMEOUT_MS if index == 0 else 700)
+        if locator is None:
+            continue
+        written = _type_card_value(locator, value)
+        if _digits(written) == _digits(value):
+            return True
+        if written:  # something landed; masked formatting may differ
+            return True
+    return False
+
+
+def _collect_field_warnings(page) -> list:
+    """Inline validation messages the checkout is currently showing."""
+    warnings = []
+    try:
+        text = _body_text(page)
+    except Exception:
+        return warnings
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or len(stripped) > 120:
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith("enter a valid") or lowered.endswith("is required"):
+            if stripped not in warnings:
+                warnings.append(stripped)
+    return warnings
+
+
+def _record_warnings(page, details: Optional[dict], stage: str) -> list:
+    """Stash the checkout's own inline validation messages under *stage*."""
+    warnings = _collect_field_warnings(page)
+    if warnings and details is not None:
+        details.setdefault("field_warnings", {})[stage] = warnings
+    return warnings
+
+
+def _option_labels(locator, limit: int = 12) -> list:
+    try:
+        return locator.evaluate(
+            "el => Array.from(el.options).map(o => o.text).filter(Boolean)"
+        )[:limit]
+    except Exception:
+        return []
+
+
 def _select_option(locator, values: Sequence[str]) -> bool:
+    """Select by value, then by exact label, then by a loose label match.
+
+    Country/province lists are localised and inconsistently punctuated
+    ("United States" vs "United States of America"), so an exact match is not
+    enough -- the last pass reads the rendered options and matches loosely.
+    """
     for value in values:
         for kwargs in ({"value": value}, {"label": value}):
             try:
@@ -783,7 +1023,29 @@ def _select_option(locator, values: Sequence[str]) -> bool:
                 return True
             except Exception:
                 continue
+    wanted = [str(v).strip().lower() for v in values if v]
+    for label in _option_labels(locator, limit=400):
+        low = label.strip().lower()
+        if not any(low == w or low.startswith(w) or w.startswith(low) for w in wanted):
+            continue
+        try:
+            locator.select_option(label=label, timeout=SHORT_TIMEOUT_MS)
+            return True
+        except Exception:
+            continue
     return False
+
+
+def _card_frame_names(page) -> list:
+    """Names/urls of the card iframes present -- empty means direct inputs."""
+    names = []
+    for frame in page.frames:
+        if frame is page.main_frame or not _frame_is_card_like(frame):
+            continue
+        label = (getattr(frame, "name", "") or "") or (getattr(frame, "url", "") or "")
+        if label and label not in names:
+            names.append(label[:120])
+    return names
 
 
 def _click(locator, page=None, timeout: int = SHORT_TIMEOUT_MS * 2) -> bool:
@@ -939,11 +1201,41 @@ def _fill_contact(page, email: str, steps: list) -> None:
         steps.append("contact_email_filled")
     else:
         steps.append("contact_email_skipped")
+    _decline_marketing(page, steps)
 
 
-def _fill_shipping(page, address: dict, steps: list) -> None:
+def _decline_marketing(page, steps: list) -> None:
+    """Untick Shopify's pre-ticked "Email me with news and offers"."""
+    locator = _find(page, MARKETING_OPT_IN_SELECTORS, timeout=1200)
+    if locator is None:
+        return
+    try:
+        if not locator.is_checked(timeout=SHORT_TIMEOUT_MS):
+            return
+        locator.uncheck(timeout=SHORT_TIMEOUT_MS, force=True)
+        steps.append("marketing_opt_out")
+    except Exception:
+        pass
+
+
+def _dismiss_autocomplete(page) -> None:
+    """Close the address-autocomplete dropdown that covers the fields below."""
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+
+
+def _select_province(page, address: dict) -> bool:
+    locator, _scope = _find_anywhere(page, PROVINCE_SELECT_SELECTORS, timeout=SHORT_TIMEOUT_MS)
+    if locator is None:
+        return False
+    return _select_option(locator, [address["province_code"], address["province"]])
+
+
+def _fill_shipping(page, address: dict, steps: list, details: Optional[dict] = None) -> None:
     filled = []
-    # Country first: it repopulates the province list.
+    # Country first: it repopulates the province list and the postcode rules.
     locator, _scope = _find_anywhere(page, COUNTRY_SELECT_SELECTORS, timeout=SHORT_TIMEOUT_MS)
     if locator is not None and _select_option(
         locator, [address["country_code"], address["country"]]
@@ -954,17 +1246,23 @@ def _fill_shipping(page, address: dict, steps: list) -> None:
         except Exception:
             pass
 
+    # Province before the text fields: the postcode triggers a city/state/ZIP
+    # cross-check, and an empty state at that moment leaves a sticky
+    # "Enter a valid state for ..." error even after the state is chosen.
+    if _select_province(page, address):
+        filled.append("province")
+
     for key, selectors in SHIPPING_SELECTORS.items():
         value = address.get(key, "")
         if not value:
             continue
         if _fill_anywhere(page, selectors, value):
             filled.append(key)
+        if key == "address1":
+            # Shopify's address autocomplete opens over the remaining fields.
+            _dismiss_autocomplete(page)
 
-    locator, _scope = _find_anywhere(page, PROVINCE_SELECT_SELECTORS, timeout=SHORT_TIMEOUT_MS)
-    if locator is not None and _select_option(
-        locator, [address["province_code"], address["province"]]
-    ):
+    if "province" not in filled and _select_province(page, address):
         filled.append("province")
 
     if not filled:
@@ -973,6 +1271,42 @@ def _fill_shipping(page, address: dict, steps: list) -> None:
             "layout is unrecognised or checkout requires an account."
         )
     steps.append(f"shipping_filled:{','.join(filled)}")
+    _record_warnings(page, details, "after_shipping")
+
+
+def _select_shipping_method(page, steps: list) -> None:
+    """Make sure a delivery rate is selected before payment.
+
+    Rates arrive asynchronously after the address is valid. Shopify normally
+    preselects the cheapest one; when it does not (or the address produced no
+    rates) we select the first radio ourselves.
+    """
+    _settle(page, ms=900)
+    for selector in SHIPPING_METHOD_SELECTORS:
+        try:
+            group = page.locator(selector)
+            count = group.count()
+        except Exception:
+            continue
+        if not count:
+            continue
+        try:
+            checked = any(group.nth(i).is_checked() for i in range(count))
+        except Exception:
+            checked = False
+        if checked:
+            steps.append("shipping_method_preselected")
+            return
+        try:
+            group.first.check(timeout=SHORT_TIMEOUT_MS, force=True)
+            selected = True
+        except Exception:
+            selected = _click(group.first, page)
+        if selected:
+            _settle(page, ms=700)
+            steps.append("shipping_method_selected")
+            return
+    steps.append("shipping_method_skipped")
 
 
 def _card_field_present(page) -> bool:
@@ -994,18 +1328,36 @@ def _advance_to_payment(page, steps: list, max_steps: int = 3) -> None:
         steps.append("continue_clicked")
 
 
-def _fill_payment(page, pan: str, expiry: str, cvv: str, holder: str, steps: list) -> None:
-    if not _fill_anywhere(page, CARD_NUMBER_SELECTORS, pan, timeout=SHORT_TIMEOUT_MS * 2):
+def _fill_payment(
+    page,
+    pan: str,
+    expiry: str,
+    cvv: str,
+    holder: str,
+    steps: list,
+    details: Optional[dict] = None,
+) -> None:
+    """Fill the card form, one field at a time inside its own iframe.
+
+    Each field is routed to the iframe that owns it: Shopify's card iframes
+    each contain inert copies of the other inputs, so a page-wide search lands
+    in the wrong frame and the value silently never reaches the gateway.
+    """
+    frames = _card_frame_names(page)
+    if details is not None:
+        details["card_frames"] = frames
+        details["card_fields_in_iframes"] = bool(frames)
+    if not _fill_card_field(page, "number", CARD_NUMBER_SELECTORS, pan):
         raise CheckoutError(
             "Card number field not found (checked the page and every iframe). "
             "Make sure a test payment gateway is enabled on the dev store."
         )
     filled = ["number"]
-    if _fill_anywhere(page, CARD_EXPIRY_SELECTORS, expiry):
+    if _fill_card_field(page, "expiry", CARD_EXPIRY_SELECTORS, expiry):
         filled.append("expiry")
-    if _fill_anywhere(page, CARD_CVV_SELECTORS, cvv):
+    if _fill_card_field(page, "cvv", CARD_CVV_SELECTORS, cvv):
         filled.append("cvv")
-    if holder and _fill_anywhere(page, CARD_NAME_SELECTORS, holder):
+    if holder and _fill_card_field(page, "name", CARD_NAME_SELECTORS, holder):
         filled.append("name")
     if "expiry" not in filled or "cvv" not in filled:
         raise CheckoutError(
@@ -1013,6 +1365,9 @@ def _fill_payment(page, pan: str, expiry: str, cvv: str, holder: str, steps: lis
             "security code fields were not found."
         )
     steps.append(f"card_filled:{','.join(filled)}")
+    warnings = _record_warnings(page, details, "after_card")
+    if warnings:
+        steps.append(f"card_warnings:{len(warnings)}")
 
 
 def _submit_payment(page, steps: list) -> None:
@@ -1102,12 +1457,15 @@ def run_shopify_checkout(
         "expiry": f"{expiry[:2]}/**",
         "headless": is_headless,
         "bogus_gateway": bogus_gateway_pan() is not None,
+        "ship_country": address["country_code"],
         "dry_run": dry_run,
         "steps": steps,
     }
 
     sync_playwright = _import_playwright()
-    manager, browser, context = _launch(sync_playwright, is_headless, timeout_ms)
+    manager, browser, context = _launch(
+        sync_playwright, is_headless, timeout_ms, locale=locale_for(address)
+    )
     page = context.new_page()
     deadline = time.time() + (timeout_ms / 1000.0)
     try:
@@ -1115,9 +1473,10 @@ def run_shopify_checkout(
         _add_to_cart(page, steps)
         _go_to_checkout(page, url, steps)
         _fill_contact(page, contact_email, steps)
-        _fill_shipping(page, address, steps)
+        _fill_shipping(page, address, steps, details)
+        _select_shipping_method(page, steps)
         _advance_to_payment(page, steps)
-        _fill_payment(page, pan, expiry, cvv, holder, steps)
+        _fill_payment(page, pan, expiry, cvv, holder, steps, details)
 
         if dry_run:
             _screenshot(page, "dry-run", details)

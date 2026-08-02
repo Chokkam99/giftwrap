@@ -17,6 +17,9 @@ Two modes:
 
 Add --dry-run to fill the entire checkout but stop before clicking Pay.
 
+Use --country US for a US-region dev store (the default shipping address is
+Indian and a US store rejects it); it seeds $CHECKOUT_ADDRESS_COUNTRY.
+
 Safety: a purchase run refuses to start unless a product URL is supplied
 (argument or SHOPIFY_DEV_STORE_PRODUCT_URL), and the module itself refuses
 non-dev-store hosts.
@@ -32,11 +35,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from checkout.playwright_checkout import (  # noqa: E402
+    ENV_ADDRESS_COUNTRY,
     ENV_PRODUCT_URL,
+    SHIPPING_PROFILES,
     CheckoutError,
     bogus_gateway_pan,
     mask_pan,
     run_shopify_checkout,
+    shipping_address,
     verify_store,
 )
 
@@ -59,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--email",
         default="gifting-demo@example.com",
         help="Contact email used on the order.",
+    )
+    parser.add_argument(
+        "--country",
+        default=None,
+        choices=sorted(SHIPPING_PROFILES),
+        help="Shipping-address region (defaults to $CHECKOUT_ADDRESS_COUNTRY, "
+        "then IN). Use US for a US-region dev store.",
     )
     parser.add_argument(
         "--headed", action="store_true", help="Show the browser window."
@@ -140,8 +153,14 @@ def _run_checkout(args) -> int:
             "instead of the real token (gateway simulation).",
             file=sys.stderr,
         )
+    # --country just seeds CHECKOUT_ADDRESS_COUNTRY so per-field CHECKOUT_SHIP_*
+    # overrides keep working on top of the chosen region profile.
+    if args.country:
+        os.environ[ENV_ADDRESS_COUNTRY] = args.country
+    address = shipping_address()
     if not args.json:
         print(f"Card: {mask_pan(args.token)}  exp {args.month}/{args.year}")
+        print(f"Ship: {address['city']}, {address['province_code']} {address['country_code']}")
         if args.dry_run:
             print("Dry run: the Pay button will NOT be clicked.")
 
@@ -163,6 +182,12 @@ def _run_checkout(args) -> int:
         f"Message : {result.message}",
         f"Steps   : {', '.join(result.details.get('steps', []))}",
     ]
+    frames = result.details.get("card_frames")
+    if frames is not None:
+        lines.append(f"Card DOM: {'iframes: ' + ', '.join(frames) if frames else 'direct inputs'}")
+    warnings = result.details.get("field_warnings")
+    if warnings:
+        lines.append(f"Warnings: {warnings}")
     screenshots = result.details.get("screenshots")
     if screenshots:
         lines.append(f"Shots   : {', '.join(screenshots)}")
