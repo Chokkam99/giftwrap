@@ -375,8 +375,19 @@ class UCPClient:
 
         chosen_variant: dict | None = None
         if pool:
+            # Prefer the variant whose own title matches the product title (the
+            # canonical/default option — what `get_product` returns as `selected`
+            # for a single-option product) over plain cheapest-in-stock. Without
+            # this, a product with decoy variants (e.g. a "Sample"/trial option
+            # priced far below the real one, as in Shopify's own selling-plans
+            # test fixtures) normalizes to the wrong price. Falls back to the
+            # full pool — unchanged cheapest-in-stock behavior — whenever no
+            # variant title matches (the common case: real variant titles are
+            # option values like "Small / Red", not the product title).
+            canonical = [v for v in pool if v.get("title") == raw.get("title")]
+            ranked = canonical or pool
             chosen_variant = min(
-                pool,
+                ranked,
                 key=lambda v: (v.get("price") or {}).get("amount", float("inf")),
             )
 

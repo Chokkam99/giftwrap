@@ -50,6 +50,11 @@ log = logging.getLogger("agentic_gifting")
 
 MAX_TOOL_ITERATIONS = 10
 DEFAULT_STORE = os.getenv("UCP_DEFAULT_STORE", "giva-jewelry.myshopify.com")
+# Our own demo merchant — also speaks UCP (verified live), so the whole demo
+# (discovery -> pick -> mint -> checkout) can run on one store via the same
+# protocol as the real ones. Listed last so it doesn't dominate breadth shots
+# against the real merchants below.
+DEMO_STORE = "agentic-gifting-demo.myshopify.com"
 # Multi-store catalog: when a tool call omits `store`, every one of these is searched
 # concurrently and the results are merged (see _multi_store_search). salty.co.in,
 # plumgoodness.com and xyxxcrew.com were verified live (WP-BROWSE) — discovery +
@@ -59,10 +64,26 @@ UCP_STORES = [
     s.strip() for s in
     os.getenv(
         "UCP_STORES",
-        "giva-jewelry.myshopify.com,mamaearth.in,salty.co.in,plumgoodness.com,xyxxcrew.com",
+        f"giva-jewelry.myshopify.com,mamaearth.in,salty.co.in,plumgoodness.com,xyxxcrew.com,{DEMO_STORE}",
     ).split(",")
     if s.strip()
 ] or [DEFAULT_STORE]
+# Demo-focus override: restrict the catalog to just our own demo store. Used for
+# the scripted transaction take so the agent finds the purchasable ski wax
+# cleanly, without real-merchant search noise. Off by default.
+if os.getenv("UCP_DEMO_STORE_ONLY", "").strip().lower() in {"1", "true", "yes"}:
+    UCP_STORES = [DEMO_STORE]
+# agentic-gifting-demo.myshopify.com's storefront is password-protected. Discovery,
+# full-catalog listing (empty query), and get_product all work fine through the
+# password gate — but its merchant-side free-text search reliably returns zero
+# products for ANY non-empty query (verified: "ski", "wax", "ski wax", "board",
+# even single-letter queries that are substrings of every title, all returned
+# nothing; giva-jewelry's search, on a non-gated store, filters correctly for
+# comparison). Likely the predictive-search index the app uses respects the
+# password lock even though the UCP app-proxy listing/lookup paths don't. Rather
+# than fabricate data, we fall back to the (real) unfiltered listing and filter
+# it client-side by keyword — see _multi_store_search.
+UCP_QUERY_FILTER_FALLBACK_STORES = {DEMO_STORE}
 # Cap on total products shown across "show more" / "load more" pagination, per
 # browsing session (buyer chat conversation, or one recipient gift-link query).
 MAX_SHOWN_PRODUCTS = 36
@@ -543,6 +564,15 @@ def _multi_store_search(
                 store=store, query=query, max_price=max_price,
                 limit=limit, cursor=cursors.get(store),
             )
+            # See UCP_QUERY_FILTER_FALLBACK_STORES: on first page only (a stale
+            # cursor from an empty-query listing wouldn't line up with one from a
+            # text query), if a store known to ignore free-text queries came back
+            # empty, re-list (still real data, still that store) and filter by
+            # keyword ourselves instead of surfacing a false "nothing found".
+            if not products and query.strip() and not cursors.get(store) and store in UCP_QUERY_FILTER_FALLBACK_STORES:
+                listing, _ = client.search_products_page(store=store, query="", max_price=max_price, limit=limit)
+                terms = query.lower().split()
+                products = [p for p in listing if any(t in (p.title or "").lower() for t in terms)]
             return store, [_fields(p, PRODUCT_FIELDS) for p in (products or [])], next_cursor, None
         except Exception as exc:  # noqa: BLE001 — captured per-store, not re-raised
             return store, [], None, exc
@@ -882,6 +912,24 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
     stub = False
     degraded: str | None = None
     client = _load_prava()
+    # REAL-CALL SAFETY GUARD: even when a real PravaClient is loaded, refuse to
+    # spend an actual quota slot unless the caller explicitly opted in with
+    # PRAVA_ALLOW_REAL=1. This is a hard stop (a tool error), not a silent
+    # fallback to the stub — the point is to make accidental local/dev runs
+    # against a live key impossible, not to quietly paper over them.
+    if client is not None and os.getenv("PRAVA_ALLOW_REAL") != "1":
+        log.warning(
+            "refusing real Prava mint_scoped_card call: PRAVA_ALLOW_REAL is not set to "
+            "'1' (quota-burn guard). Set PRAVA_ALLOW_REAL=1 to allow real calls."
+        )
+        return {
+            "error": "real_prava_calls_disabled",
+            "message": (
+                "Refused: real Prava API calls are disabled (PRAVA_ALLOW_REAL is not "
+                "set to '1'). This guard exists to prevent accidental quota burn during "
+                "local testing. Set PRAVA_ALLOW_REAL=1 to allow a real mint."
+            ),
+        }
     if client is not None:
         try:
             # Real signature (WP1): create_session(user_id, user_email, total_amount,
