@@ -145,8 +145,33 @@ class UCPClient:
         max_price: float | None = None,
         limit: int = 10,
     ) -> list[Product]:
+        """Unchanged contract (WP4/WP5 depend on it): first page, no cursor.
+
+        Delegates to `search_products_page` and discards the cursor. Use
+        `search_products_page` directly to thread `pagination.cursor` through
+        for "show more" / "load more" (WP-BROWSE).
+        """
+        products, _cursor = self.search_products_page(store, query, max_price=max_price, limit=limit)
+        return products
+
+    def search_products_page(
+        self,
+        store: str,
+        query: str,
+        max_price: float | None = None,
+        limit: int = 10,
+        cursor: str | None = None,
+    ) -> tuple[list[Product], str | None]:
+        """Cursor-aware search. Returns (products, next_cursor).
+
+        `next_cursor` is None when the merchant reports no further page
+        (`pagination.has_next_page` is false/absent) — callers should treat
+        that as "nothing more to load", not retry with a stale cursor.
+        """
         endpoint = self.discover(store)
         catalog: dict[str, Any] = {"query": query, "pagination": {"limit": limit}}
+        if cursor:
+            catalog["pagination"]["cursor"] = cursor
         if max_price is not None:
             catalog["filters"] = {"price_range": {"max": str(max_price)}}
 
@@ -158,9 +183,21 @@ class UCPClient:
         data = self._extract_content(result)
         self._raise_if_error(result, data)
         products = data.get("products") or []
-        return [self._normalize_product(p, store) for p in products]
+        pagination = data.get("pagination") or {}
+        next_cursor = pagination.get("cursor") if pagination.get("has_next_page") else None
+        return [self._normalize_product(p, store) for p in products], next_cursor
 
     def get_product(self, store: str, product_id: str) -> Product:
+        product, _raw = self.get_product_full(store, product_id)
+        return product
+
+    def get_product_full(self, store: str, product_id: str) -> tuple[Product, dict]:
+        """Like `get_product`, but also returns the raw UCP product payload —
+        full media list, variants (with options/availability), and
+        description.html — everything the normalized `Product` contract
+        deliberately drops. Used by the product detail view (WP-BROWSE);
+        `get_product` keeps its exact existing return type for WP4/WP5.
+        """
         endpoint = self.discover(store)
         arguments = {
             "meta": {"ucp-agent": {"profile": self.agent_profile_url}},
@@ -172,7 +209,7 @@ class UCPClient:
         product = data.get("product")
         if not product:
             raise UCPError(f"Product {product_id!r} not found")
-        return self._normalize_product(product, store)
+        return self._normalize_product(product, store), product
 
     # ------------------------------------------------------------------
     # JSON-RPC / MCP transport

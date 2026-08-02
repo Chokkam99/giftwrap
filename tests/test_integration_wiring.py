@@ -62,7 +62,10 @@ def product(price: str, title: str = "Silver Earrings", pid: str = "gid://p/1"):
 
 def test_search_products_calls_the_real_ucp_signature(monkeypatch):
     fake = create_autospec(ucp_client.UCPClient, instance=True)
-    fake.search_products.return_value = [product("1999.00"), product("2500.00")]
+    # WP-BROWSE: search now goes through the cursor-aware page method so
+    # main.py can thread pagination.cursor for "show more" — it returns
+    # (products, next_cursor) instead of a bare list.
+    fake.search_products_page.return_value = ([product("1999.00"), product("2500.00")], "cur_1")
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
     # Pin a single store explicitly: omitting it now fans the search out across every
@@ -71,7 +74,7 @@ def test_search_products_calls_the_real_ucp_signature(monkeypatch):
         conversation(), {"query": "earrings", "store": main.DEFAULT_STORE}
     )
 
-    kwargs = fake.search_products.call_args.kwargs
+    kwargs = fake.search_products_page.call_args.kwargs
     assert kwargs["store"] == main.DEFAULT_STORE
     assert kwargs["query"] == "earrings"
     assert kwargs["max_price"] == 3000.0  # budget flows through as the cap
@@ -85,12 +88,12 @@ def test_search_products_calls_the_real_ucp_signature(monkeypatch):
 def test_search_hard_filters_over_budget_results(monkeypatch):
     """UCP's price_range.max is a soft hint — our filter is the hard one."""
     fake = create_autospec(ucp_client.UCPClient, instance=True)
-    fake.search_products.return_value = [
+    fake.search_products_page.return_value = ([
         product("2999.00", "In budget"),
         product("5499.00", "Over budget"),      # the soft-hint leak WP2 observed
         product("3000.00", "Exactly at budget"),
         product("0.00", "Unpriced"),            # unknown price cannot be proven in budget
-    ]
+    ], None)
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
     # Pin a single store: WP6 multi-store search fans out across all configured stores
@@ -107,7 +110,9 @@ def test_search_hard_filters_over_budget_results(monkeypatch):
 
 def test_explicit_max_price_below_budget_wins(monkeypatch):
     fake = create_autospec(ucp_client.UCPClient, instance=True)
-    fake.search_products.return_value = [product("1500.00", "Cheap"), product("2900.00", "Pricey")]
+    fake.search_products_page.return_value = (
+        [product("1500.00", "Cheap"), product("2900.00", "Pricey")], None
+    )
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
     # Pin a single store: WP6 multi-store search fans out across all configured stores
@@ -115,14 +120,14 @@ def test_explicit_max_price_below_budget_wins(monkeypatch):
     result = main._tool_search_products(
         conversation(3000.0), {"query": "ring", "max_price": 2000, "store": main.DEFAULT_STORE}
     )
-    assert fake.search_products.call_args.kwargs["max_price"] == 2000.0
+    assert fake.search_products_page.call_args.kwargs["max_price"] == 2000.0
     assert [p["title"] for p in result["products"]] == ["Cheap"]
 
 
 def test_empty_but_working_catalog_does_not_fake_products(monkeypatch):
     """Nothing in budget is real information — it must not become stub data."""
     fake = create_autospec(ucp_client.UCPClient, instance=True)
-    fake.search_products.return_value = []
+    fake.search_products_page.return_value = ([], None)
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
     result = main._tool_search_products(conversation(), {"query": "yacht"})
@@ -134,7 +139,7 @@ def test_empty_but_working_catalog_does_not_fake_products(monkeypatch):
 
 def test_ucp_failure_is_loud(monkeypatch):
     fake = create_autospec(ucp_client.UCPClient, instance=True)
-    fake.search_products.side_effect = ucp_client.UCPError("discovery failed")
+    fake.search_products_page.side_effect = ucp_client.UCPError("discovery failed")
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
     result = main._tool_search_products(conversation(), {"query": "earrings"})

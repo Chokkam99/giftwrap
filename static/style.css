@@ -67,6 +67,13 @@ body {
   background-size: 22px 22px;
 }
 
+/* The recipient page is a browsing surface, not a chat thread — give the
+   grid room to actually show 3-4 columns on desktop instead of the chat's
+   narrow single-column shell. */
+.app.gift-app {
+  max-width: 1080px;
+}
+
 /* Header */
 .app-header {
   display: flex;
@@ -718,6 +725,17 @@ body {
   color: var(--forest-800);
 }
 
+/* "Show more like this" chip under a buyer-chat card row (WP-BROWSE) */
+.show-more-chip {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.show-more-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Gift link card (Mode B — buyer shares this so the recipient can pick) */
 .gift-link-card {
   background: var(--surface);
@@ -858,68 +876,115 @@ body {
   font-size: 14.5px;
 }
 
-.gift-search-wrap {
-  max-width: 480px;
+/* Recipient browsing controls (WP-BROWSE) — pinned while the grid scrolls */
+.gift-controls {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   width: 100%;
+  max-width: 1040px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 10px;
-}
-
-.gift-search-form {
-  display: flex;
-  gap: 10px;
-}
-
-.gift-search-input {
-  flex: 1;
-  padding: 12px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  font-size: 15px;
-  outline: none;
-  background: var(--cream-100);
-  color: var(--text);
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.gift-search-input:focus {
-  border-color: var(--forest-600);
-  background: var(--surface);
-}
-
-.gift-search-btn {
-  padding: 12px 18px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--gold-600);
-  color: var(--forest-950);
-  font-weight: 700;
-  font-size: 15px;
-  cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
-}
-
-.gift-search-btn:hover {
-  background: var(--gold-500);
-  transform: translateY(-1px);
+  padding: 12px 14px 14px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
 }
 
 .gift-chips {
   justify-content: center;
 }
 
-.gift-grid {
-  max-width: 900px;
-  width: 100%;
+.suggestion-chip.active {
+  background: var(--forest-800);
+  border-color: var(--forest-800);
+  color: var(--gold-300);
+}
+
+.gift-store-toggle {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
+  gap: 6px;
+}
+
+.store-toggle-btn {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.store-toggle-btn:hover {
+  border-color: var(--gold-500);
+}
+
+.store-toggle-btn.active {
+  background: var(--gold-500);
+  border-color: var(--gold-500);
+  color: var(--forest-950);
+}
+
+.gift-sort-row {
+  display: flex;
+  align-items: center;
+}
+
+.gift-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.gift-sort-select {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Responsive grid: 2 columns on mobile, 3-4 on desktop */
+.gift-grid {
+  max-width: 1040px;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+  padding: 4px 2px;
 }
 
 .gift-grid .product-card {
-  width: 190px;
+  width: auto;
+}
+
+@media (min-width: 640px) {
+  .gift-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 900px) {
+  .gift-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.gift-grid .gift-empty,
+.gift-grid .gift-loading {
+  grid-column: 1 / -1;
 }
 
 .gift-empty,
@@ -927,6 +992,17 @@ body {
   color: var(--text-muted);
   font-size: 14px;
   padding: 20px 0;
+  text-align: center;
+}
+
+.gift-load-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 6px 0 30px;
+}
+
+.gift-load-more-btn {
+  padding: 10px 22px;
 }
 
 .gift-picked-card {
@@ -940,14 +1016,281 @@ body {
   font-size: 14.5px;
 }
 
+/* Product detail modal (desktop) / bottom-sheet (<=480px) — WP-BROWSE.
+   Shared by buyer chat (app.js) and the recipient grid (gift.js). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 32, 22, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: modal-fade-in 0.18s ease both;
+}
+
+@keyframes modal-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.modal-panel {
+  position: relative;
+  width: 100%;
+  max-width: 440px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lift);
+  animation: modal-pop-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+@keyframes modal-pop-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(15, 32, 22, 0.55);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close:hover {
+  background: rgba(15, 32, 22, 0.75);
+}
+
+.modal-carousel {
+  position: relative;
+}
+
+.modal-carousel-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  background: var(--cream-200);
+  overflow: hidden;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.modal-carousel-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.modal-image-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(140deg, var(--cream-200), var(--gold-300) 160%);
+  color: var(--forest-700);
+}
+
+.modal-carousel-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--forest-800);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow);
+}
+
+.modal-carousel-arrow-prev { left: 10px; }
+.modal-carousel-arrow-next { right: 10px; }
+
+.modal-carousel-dots {
+  position: absolute;
+  bottom: 10px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+}
+
+.modal-carousel-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.modal-carousel-dot.active {
+  background: #fff;
+  transform: scale(1.3);
+}
+
+.modal-body {
+  padding: 18px 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modal-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--forest-800);
+  line-height: 1.35;
+}
+
+.modal-merchant {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.modal-price {
+  font-size: 19px;
+  font-weight: 800;
+  color: var(--forest-800);
+}
+
+.modal-headroom {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--gold-700);
+}
+
+.modal-loading,
+.modal-error {
+  margin: 4px 0 0;
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+
+.modal-description-wrap {
+  margin-top: 4px;
+}
+
+.modal-description {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  white-space: pre-line;
+}
+
+.modal-description.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.modal-more-btn {
+  margin-top: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--forest-700);
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.modal-variants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.variant-chip {
+  border: 1px solid var(--border);
+  background: var(--cream-100);
+  color: var(--forest-800);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 7px 13px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.variant-chip:hover:not(:disabled) {
+  border-color: var(--gold-500);
+}
+
+.variant-chip.selected {
+  background: var(--forest-800);
+  border-color: var(--forest-800);
+  color: var(--gold-300);
+}
+
+.variant-chip:disabled {
+  opacity: 0.4;
+  text-decoration: line-through;
+  cursor: not-allowed;
+}
+
+.modal-cta {
+  margin-top: 10px;
+  width: 100%;
+  justify-content: center;
+}
+
 @media (max-width: 480px) {
-  .gift-search-form {
-    flex-direction: column;
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
   }
 
-  .gift-grid .product-card {
-    width: 160px;
+  .modal-panel {
+    max-width: none;
+    max-height: 92vh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    animation: sheet-slide-up 0.24s cubic-bezier(0.2, 0.8, 0.3, 1) both;
   }
+
+  .modal-carousel-frame {
+    aspect-ratio: 4 / 4.2;
+  }
+}
+
+@keyframes sheet-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
 }
 
 /* Mobile */
@@ -1000,7 +1343,9 @@ body {
   .receipt-card,
   .budget-chip,
   .welcome-card,
-  .typing-indicator {
+  .typing-indicator,
+  .modal-backdrop,
+  .modal-panel {
     animation: none !important;
   }
 

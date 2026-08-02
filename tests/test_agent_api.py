@@ -144,7 +144,8 @@ def test_health_reports_real_modules_when_they_load(client, monkeypatch):
 def test_health_surfaces_runtime_degradation(client, monkeypatch):
     """A real module that fails at call time must show up as degraded."""
     class Boom:
-        def search_products(self, store, query, max_price=None, limit=10):
+        # WP-BROWSE: search now goes through the cursor-aware page method.
+        def search_products_page(self, store, query, max_price=None, limit=10, cursor=None):
             raise RuntimeError("catalog exploded")
 
     monkeypatch.setattr(main, "_load_ucp", lambda: Boom())

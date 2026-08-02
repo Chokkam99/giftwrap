@@ -18,6 +18,7 @@ Safety invariants enforced here (not just in the prompt):
 
 from __future__ import annotations
 
+import html
 import importlib
 import json
 import logging
@@ -47,12 +48,21 @@ MAX_TOKENS = 8192
 MAX_TOOL_ITERATIONS = 10
 DEFAULT_STORE = os.getenv("UCP_DEFAULT_STORE", "giva-jewelry.myshopify.com")
 # Multi-store catalog: when a tool call omits `store`, every one of these is searched
-# concurrently and the results are merged (see _multi_store_search).
+# concurrently and the results are merged (see _multi_store_search). salty.co.in,
+# plumgoodness.com and xyxxcrew.com were verified live (WP-BROWSE) — discovery +
+# one search each succeeded against their Shopify UCP endpoints. xyxx.com itself is
+# a parked/unrelated domain; the brand's real storefront is xyxxcrew.com.
 UCP_STORES = [
     s.strip() for s in
-    os.getenv("UCP_STORES", "giva-jewelry.myshopify.com,mamaearth.in").split(",")
+    os.getenv(
+        "UCP_STORES",
+        "giva-jewelry.myshopify.com,mamaearth.in,salty.co.in,plumgoodness.com,xyxxcrew.com",
+    ).split(",")
     if s.strip()
 ] or [DEFAULT_STORE]
+# Cap on total products shown across "show more" / "load more" pagination, per
+# browsing session (buyer chat conversation, or one recipient gift-link query).
+MAX_SHOWN_PRODUCTS = 36
 CURRENCY = os.getenv("GIFT_CURRENCY", "INR")
 CARD_POLL_TIMEOUT = 10  # seconds — short so the model can poll conversationally
 BUYER_ID = os.getenv("PRAVA_USER_ID", "agentic-gifting-buyer")
@@ -192,6 +202,10 @@ class Conversation:
     #                credential (server-only), txn_ref_id, polls, stub, completed}
     minted: dict[str, dict[str, Any]] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)  # product_url -> price
+    # "Show more like this" pagination state (WP-BROWSE). Set by the search tool,
+    # consumed by POST /chat/{id}/more. None until the first real (non-stub) search.
+    #   {query, max_price, stores, cursors: {store: cursor}, shown_ids: set[str]}
+    last_search: dict[str, Any] | None = None
 
 
 CONVERSATIONS: dict[str, Conversation] = {}
@@ -426,27 +440,41 @@ def _within_budget(products: list[dict], max_price: float | None) -> tuple[list[
 
 
 def _multi_store_search(
-    stores: list[str], query: str, max_price: float | None
-) -> tuple[list[dict], dict[str, str], bool]:
+    stores: list[str],
+    query: str,
+    max_price: float | None,
+    cursors: dict[str, str] | None = None,
+    limit: int = 12,
+) -> tuple[list[dict], dict[str, str], bool, dict[str, str]]:
     """Search `stores` for `query`, concurrently when there is more than one.
 
-    Returns (merged_products, degraded_stores, client_missing). `degraded_stores`
-    maps store -> failure reason for stores whose search raised; stores that
-    returned (even an empty list) successfully are not included in it.
+    Returns (merged_products, degraded_stores, client_missing, next_cursors).
+    `degraded_stores` maps store -> failure reason for stores whose search
+    raised; stores that returned (even an empty list) successfully are not
+    included in it. `cursors` optionally supplies a per-store continuation
+    cursor (from a prior call's `next_cursors`) for "show more" / "load more";
+    omit it for a fresh first-page search. `next_cursors` only contains
+    entries for stores that reported another page.
     """
     client = _load_ucp()
     if client is None:
-        return [], {}, True
+        return [], {}, True, {}
 
-    def _search_one(store: str) -> tuple[str, list[dict], BaseException | None]:
+    cursors = cursors or {}
+
+    def _search_one(store: str) -> tuple[str, list[dict], str | None, BaseException | None]:
         try:
-            # Real signature: search_products(store, query, max_price=None, limit=10).
-            # Over-fetch, because the server-side price filter is only a hint and
-            # our own hard filter below will discard the strays.
-            raw = client.search_products(store=store, query=query, max_price=max_price, limit=12)
-            return store, [_fields(p, PRODUCT_FIELDS) for p in (raw or [])], None
+            # Real signature: search_products_page(store, query, max_price=None,
+            # limit=10, cursor=None) -> (products, next_cursor). Over-fetch, because
+            # the server-side price filter is only a hint and our own hard filter
+            # below will discard the strays.
+            products, next_cursor = client.search_products_page(
+                store=store, query=query, max_price=max_price,
+                limit=limit, cursor=cursors.get(store),
+            )
+            return store, [_fields(p, PRODUCT_FIELDS) for p in (products or [])], next_cursor, None
         except Exception as exc:  # noqa: BLE001 — captured per-store, not re-raised
-            return store, [], exc
+            return store, [], None, exc
 
     if len(stores) > 1:
         with ThreadPoolExecutor(max_workers=min(len(stores), 8)) as pool:
@@ -456,12 +484,41 @@ def _multi_store_search(
 
     products: list[dict] = []
     degraded_stores: dict[str, str] = {}
-    for store, prods, exc in outcomes:
+    next_cursors: dict[str, str] = {}
+    for store, prods, next_cursor, exc in outcomes:
         if exc is not None:
             degraded_stores[store] = _mark_degraded("ucp", f"search_products[{store}]", exc)
         else:
             products.extend(prods)
-    return products, degraded_stores, False
+            if next_cursor:
+                next_cursors[store] = next_cursor
+    return products, degraded_stores, False, next_cursors
+
+
+def _more_products(
+    stores: list[str],
+    query: str,
+    max_price: float | None,
+    cursors: dict[str, str],
+    shown_ids: set[str],
+    cap: int = MAX_SHOWN_PRODUCTS,
+) -> tuple[list[dict], dict[str, str]]:
+    """Fetch the next page(s) for an existing "show more" / "load more" session.
+
+    Dedupes against `shown_ids` (a product can reappear across store pages) and
+    trims to whatever room is left under `cap`. Returns (fresh_products,
+    next_cursors) — call sites should merge next_cursors into their stored
+    cursor map and add the fresh ids to shown_ids.
+    """
+    if not cursors:
+        return [], {}
+    products, _degraded_stores, _client_missing, next_cursors = _multi_store_search(
+        stores, query, max_price, cursors=cursors
+    )
+    products, _dropped = _within_budget(products, max_price)
+    fresh = [p for p in products if p.get("id") not in shown_ids]
+    room = max(0, cap - len(shown_ids))
+    return fresh[:room], next_cursors
 
 
 def _tool_search_products(conv: Conversation, args: dict) -> dict:
@@ -473,7 +530,9 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
 
     # Omitting `store` fans the search out across every configured store at once.
     stores = [store_arg] if store_arg else list(UCP_STORES)
-    products, degraded_stores, client_missing = _multi_store_search(stores, query, max_price)
+    products, degraded_stores, client_missing, next_cursors = _multi_store_search(
+        stores, query, max_price
+    )
 
     products, dropped = _within_budget(products, max_price)
     products = products[:12]
@@ -516,6 +575,16 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
             if max_price is not None
             else f"The catalog{where} returned no products for {query!r}."
         )
+
+    # "Show more like this" pagination state — only for real (non-stub) results;
+    # a stub search has no cursor and nothing more to page through.
+    if not result.get("stub"):
+        shown_ids = {p["id"] for p in products if p.get("id")}
+        conv.last_search = {
+            "query": query, "max_price": max_price, "stores": stores,
+            "cursors": next_cursors, "shown_ids": shown_ids,
+        }
+        result["has_more"] = bool(next_cursors) and len(shown_ids) < MAX_SHOWN_PRODUCTS
     return result
 
 
@@ -553,6 +622,142 @@ def _tool_get_product(conv: Conversation, args: dict) -> dict:
             f"{conv.budget:.2f} {CURRENCY}. Minting for it will be refused."
         )
     return result
+
+
+# ------------------------------------------------------------- product detail
+# (GET /product — the browsing modal/bottom-sheet on both buyer chat and the
+# recipient page. Wraps ucp.client.get_product_full: a real UCP call, no LLM.)
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_BR_RE = re.compile(r"(?i)<br\s*/?>")
+_BLOCK_CLOSE_RE = re.compile(r"(?i)</(p|div|li)\s*>")
+_BLANKLINES_RE = re.compile(r"\n{3,}")
+
+
+def _strip_html(raw: Any) -> str:
+    """Merchant descriptions arrive as `{"html": "..."}` (occasionally a bare
+    string). Render to plain text: block/line breaks become newlines, every
+    other tag is dropped, entities are unescaped."""
+    if isinstance(raw, dict):
+        text = raw.get("html") or raw.get("text") or ""
+    elif isinstance(raw, str):
+        text = raw
+    else:
+        text = ""
+    if not text:
+        return ""
+    text = _BR_RE.sub("\n", text)
+    text = _BLOCK_CLOSE_RE.sub("\n\n", text)
+    text = _TAG_RE.sub("", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = _BLANKLINES_RE.sub("\n\n", text)
+    return text.strip()
+
+
+def _minor_to_price(amount: Any) -> str | None:
+    """UCP catalog prices are integer minor units, same convention as
+    ucp.client._format_amount, kept local so this module doesn't reach into
+    another module's private helper."""
+    if amount is None:
+        return None
+    try:
+        return f"{float(amount) / 100:.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _variant_label(variant: dict) -> str:
+    labels = [
+        o.get("label") for o in (variant.get("options") or [])
+        if o.get("label") and o.get("label") != "Default Title"
+    ]
+    if labels:
+        return " / ".join(labels)
+    return variant.get("title") or "Option"
+
+
+def _build_variant_chips(raw: dict, fallback_price: str | None, fallback_currency: str | None) -> list[dict]:
+    """Read-only variant chips (sizes/colors) for the detail modal.
+
+    UCP's `get_product` is documented to return every option VALUE (e.g. all
+    of S/M/L/XL/XXL) under `options`, but — at least for the live merchants
+    checked here — only the currently-selected variant's own price/
+    availability under `variants`. We merge the two: a chip whose label
+    matches a returned variant gets that variant's real price/availability;
+    every other chip falls back to the product's own price and is treated as
+    available (no live stock signal for it, and this is a browsing surface,
+    not checkout — final availability is re-checked wherever a purchase
+    actually happens).
+    """
+    variants_raw = raw.get("variants") or []
+    options_raw = raw.get("options") or []
+    variant_by_label = {_variant_label(v): v for v in variants_raw}
+
+    chips: list[dict] = []
+    if len(options_raw) == 1 and options_raw[0].get("name") not in (None, "Title"):
+        for value in options_raw[0].get("values") or []:
+            label = value.get("label")
+            if not label:
+                continue
+            matched = variant_by_label.get(label)
+            price_obj = (matched or {}).get("price") or {}
+            chips.append({
+                "id": (matched or {}).get("id"),
+                "label": label,
+                "price": _minor_to_price(price_obj.get("amount")) or fallback_price,
+                "currency": price_obj.get("currency") or fallback_currency,
+                "available": (
+                    bool((matched.get("availability") or {}).get("available"))
+                    if matched else bool(value.get("available", True))
+                ),
+            })
+    else:
+        for v in variants_raw:
+            price_obj = v.get("price") or {}
+            chips.append({
+                "id": v.get("id"),
+                "label": _variant_label(v),
+                "price": _minor_to_price(price_obj.get("amount")) or fallback_price,
+                "currency": price_obj.get("currency") or fallback_currency,
+                "available": bool((v.get("availability") or {}).get("available")),
+            })
+
+    # A single "Default Title"/"Option" chip is not a real choice — suppress it.
+    if len(chips) <= 1 and all(c["label"] in ("Default Title", "Option") for c in chips):
+        return []
+    return chips
+
+
+def _build_product_detail(
+    product: Any, raw: dict, budget: float | None
+) -> dict:
+    """Combine the normalized Product (price/variant already picked as
+    "cheapest in stock") with the raw UCP payload (all images, every variant,
+    description) into what the detail modal needs."""
+    fields = _fields(product, PRODUCT_FIELDS)
+
+    images = [m.get("url") for m in (raw.get("media") or []) if m.get("url")]
+    if not images and fields.get("image_url"):
+        images = [fields["image_url"]]
+
+    detail: dict[str, Any] = {
+        **fields,
+        "images": images,
+        "description": _strip_html(raw.get("description")),
+        "variants": _build_variant_chips(raw, fields.get("price"), fields.get("currency")),
+    }
+
+    price = _parse_amount(fields.get("price"))
+    if budget is not None and price is not None:
+        detail["budget_headroom"] = {
+            "budget": budget,
+            "spend": price,
+            "remaining": round(budget - price, 2),
+            "currency": fields.get("currency") or CURRENCY,
+        }
+    return detail
 
 
 def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
@@ -810,6 +1015,7 @@ def _tool_create_gift_link(conv: Conversation, args: dict) -> dict:
         "buyer_conversation_id": conv.id,
         "status": "awaiting_pick",
         "picked_product": None,
+        "last_search": None,  # set by /gift/{token}/search — pagination state for /more
     }
     log.info("created gift link token=%s… budget=%.2f", token[:8], conv.budget)
     return {
@@ -898,6 +1104,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     texts: list[str] = []
     cards: list[dict] = []
     action: dict | None = None
+    has_more = False
 
     for _ in range(MAX_TOOL_ITERATIONS):
         response = client.messages.create(
@@ -924,6 +1131,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
             result = dispatch_tool(conv, block.name, block.input or {})
             if block.name == "search_products":
                 cards = result.get("products", []) or cards
+                has_more = bool(result.get("has_more"))
             elif block.name == "get_product" and result.get("product"):
                 cards = [result["product"]]
             elif block.name == "mint_scoped_card" and result.get("session_id"):
@@ -948,6 +1156,9 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
         "cards": cards or None,
         "action": action,
         "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
+        # True when the search that produced `cards` has another page — drives the
+        # "Show more like this" chip. False (never null) so the UI never has to guess.
+        "has_more": has_more,
     }
 
 
@@ -965,10 +1176,13 @@ class ChatResponse(BaseModel):
     action: dict | None = None
     # Optional; WP5's header chip updates from this when present.
     budget: str | None = None
+    # WP-BROWSE: whether the "Show more like this" chip should render under cards.
+    has_more: bool = False
 
 
 class GiftSearchRequest(BaseModel):
     query: str
+    store: str | None = None  # None/omitted = every configured store (unchanged default)
 
 
 class GiftPickRequest(BaseModel):
@@ -1035,6 +1249,42 @@ def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(**payload)
 
 
+@app.post("/chat/{conversation_id}/more")
+def chat_more(conversation_id: str) -> dict:
+    """"Show more like this" — appends the next page to the last search's
+    card row. Deliberately bypasses the Claude tool loop entirely (no LLM
+    call): this is plain pagination over the same query/stores/budget the
+    agent already searched with."""
+    conv = CONVERSATIONS.get(conversation_id)
+    if conv is None or not conv.last_search:
+        raise HTTPException(status_code=404, detail="No previous search to continue from.")
+    ls = conv.last_search
+    fresh, next_cursors = _more_products(
+        ls["stores"], ls["query"], ls["max_price"], ls["cursors"], ls["shown_ids"]
+    )
+    ls["cursors"] = next_cursors
+    ls["shown_ids"] |= {p["id"] for p in fresh if p.get("id")}
+    return {
+        "products": fresh,
+        "has_more": bool(next_cursors) and len(ls["shown_ids"]) < MAX_SHOWN_PRODUCTS,
+    }
+
+
+@app.get("/product")
+def product_detail(store: str, id: str, budget: float | None = None) -> dict:
+    """Real UCP `get_product` call (no LLM) for the browsing detail modal/sheet
+    on both buyer chat and the recipient page: every image, every variant
+    (with availability), plain-text description, and budget headroom."""
+    client = _load_ucp()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Catalog service is unavailable.")
+    try:
+        product, raw = client.get_product_full(store, id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not load that product: {exc}")
+    return _build_product_detail(product, raw, budget)
+
+
 # ------------------------------------------------------------- Mode B: gift links
 
 
@@ -1056,8 +1306,9 @@ def gift_page(token: str):
 
 @app.get("/gift/{token}/info")
 def gift_info(token: str) -> dict:
-    """Everything the recipient page is allowed to see: note, budget, pick status.
-    Never the buyer's conversation id, store list details beyond what's needed, etc."""
+    """Everything the recipient page is allowed to see: note, budget, pick status,
+    and which stores are searchable (for the store toggle). Never the buyer's
+    conversation id."""
     gift = _get_gift_or_404(token)
     return {
         "budget": gift["budget"],
@@ -1065,27 +1316,35 @@ def gift_info(token: str) -> dict:
         "note": gift["note"],
         "status": gift["status"],
         "picked_product": gift["picked_product"],
+        "stores": gift["stores"],
     }
 
 
 @app.post("/gift/{token}/search")
 def gift_search(token: str, req: GiftSearchRequest) -> dict:
-    """Real, server-side UCP search across the gift's store set, hard budget-filtered.
-    The recipient never gets tool access — this is a plain product search, nothing more."""
+    """Real, server-side UCP search across the gift's store set (or one store,
+    for the store toggle), hard budget-filtered. The recipient never gets tool
+    access — this is a plain product search, nothing more."""
     gift = _get_gift_or_404(token)
     max_price = gift["budget"]
-    products, degraded_stores, client_missing = _multi_store_search(
-        gift["stores"], req.query, max_price
+
+    store_filter = (req.store or "").strip() or None
+    if store_filter and store_filter not in gift["stores"]:
+        raise HTTPException(status_code=400, detail=f"{store_filter!r} is not one of this gift's stores.")
+    stores = [store_filter] if store_filter else gift["stores"]
+
+    products, degraded_stores, client_missing, next_cursors = _multi_store_search(
+        stores, req.query, max_price
     )
     products, dropped = _within_budget(products, max_price)
     products = products[:12]
 
-    result: dict[str, Any] = {"stores_searched": gift["stores"]}
+    result: dict[str, Any] = {"stores_searched": stores}
     all_failed = client_missing or (
-        bool(degraded_stores) and len(degraded_stores) == len(gift["stores"])
+        bool(degraded_stores) and len(degraded_stores) == len(stores)
     )
     if all_failed:
-        fallback_store = gift["stores"][0] if gift["stores"] else DEFAULT_STORE
+        fallback_store = stores[0] if stores else DEFAULT_STORE
         products = _within_budget(_stub_products(fallback_store, req.query, max_price), max_price)[0]
         result["stub"] = True
 
@@ -1094,7 +1353,34 @@ def gift_search(token: str, req: GiftSearchRequest) -> dict:
     result["max_price_enforced"] = max_price
     if dropped:
         result["filtered_out_over_budget"] = dropped
+
+    if not result.get("stub"):
+        shown_ids = {p["id"] for p in products if p.get("id")}
+        gift["last_search"] = {
+            "query": req.query, "max_price": max_price, "stores": stores,
+            "cursors": next_cursors, "shown_ids": shown_ids,
+        }
+        result["has_more"] = bool(next_cursors) and len(shown_ids) < MAX_SHOWN_PRODUCTS
     return result
+
+
+@app.post("/gift/{token}/more")
+def gift_more(token: str) -> dict:
+    """"Load more" on the recipient's browsing grid — same pagination as the
+    buyer chat's "show more" chip, continuing the gift's last search."""
+    gift = _get_gift_or_404(token)
+    ls = gift.get("last_search")
+    if not ls:
+        raise HTTPException(status_code=404, detail="No previous search to continue from.")
+    fresh, next_cursors = _more_products(
+        ls["stores"], ls["query"], ls["max_price"], ls["cursors"], ls["shown_ids"]
+    )
+    ls["cursors"] = next_cursors
+    ls["shown_ids"] |= {p["id"] for p in fresh if p.get("id")}
+    return {
+        "products": fresh,
+        "has_more": bool(next_cursors) and len(ls["shown_ids"]) < MAX_SHOWN_PRODUCTS,
+    }
 
 
 @app.post("/gift/{token}/pick")

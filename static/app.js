@@ -71,65 +71,134 @@
     return div;
   }
 
-  function renderCards(group, cards) {
+  var currentBudget = null; // numeric budget, tracked for the modal's headroom fetch
+
+  function storeLabel(domain) {
+    return (window.GiftModal && window.GiftModal.storeLabel)
+      ? window.GiftModal.storeLabel(domain) : domain;
+  }
+
+  function approveProduct(product) {
+    sendMessage('I approve: ' + product.title + ' (id ' + product.id + ') at ' + product.price);
+  }
+
+  function buildCard(card, index) {
+    var cardEl = document.createElement('div');
+    cardEl.className = 'product-card';
+    cardEl.style.animationDelay = index * 70 + 'ms';
+
+    if (card.image_url) {
+      var img = document.createElement('img');
+      img.className = 'product-card-image';
+      img.src = card.image_url;
+      img.alt = card.title || 'Product image';
+      img.addEventListener('error', function () {
+        img.replaceWith(placeholderImage());
+      });
+      cardEl.appendChild(img);
+    } else {
+      cardEl.appendChild(placeholderImage());
+    }
+
+    var body = document.createElement('div');
+    body.className = 'product-card-body';
+
+    var title = document.createElement('div');
+    title.className = 'product-card-title';
+    title.textContent = card.title || 'Untitled gift';
+    body.appendChild(title);
+
+    if (card.merchant) {
+      var merchant = document.createElement('span');
+      merchant.className = 'product-card-merchant';
+      merchant.textContent = storeLabel(card.merchant);
+      body.appendChild(merchant);
+    }
+
+    var price = document.createElement('div');
+    price.className = 'product-card-price';
+    price.textContent = formatPrice(card.price, card.currency);
+    body.appendChild(price);
+
+    var btn = document.createElement('button');
+    btn.className = 'product-card-btn';
+    btn.type = 'button';
+    btn.textContent = 'Gift this';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      approveProduct(card);
+    });
+    body.appendChild(btn);
+
+    cardEl.appendChild(body);
+
+    // Click anywhere on the card (not the CTA) opens the detail modal.
+    cardEl.addEventListener('click', function (e) {
+      if (e.target.closest('.product-card-btn')) return;
+      if (window.GiftModal) {
+        window.GiftModal.open({
+          product: card,
+          store: card.merchant,
+          budget: currentBudget,
+          ctaLabel: 'Gift this',
+          onApprove: approveProduct,
+        });
+      }
+    });
+
+    return cardEl;
+  }
+
+  function renderCards(group, cards, hasMore) {
     if (!cards || !cards.length) return;
 
     var row = document.createElement('div');
     row.className = 'card-row';
-
     cards.forEach(function (card, index) {
-      var cardEl = document.createElement('div');
-      cardEl.className = 'product-card';
-      cardEl.style.animationDelay = index * 70 + 'ms';
-
-      if (card.image_url) {
-        var img = document.createElement('img');
-        img.className = 'product-card-image';
-        img.src = card.image_url;
-        img.alt = card.title || 'Product image';
-        img.addEventListener('error', function () {
-          img.replaceWith(placeholderImage());
-        });
-        cardEl.appendChild(img);
-      } else {
-        cardEl.appendChild(placeholderImage());
-      }
-
-      var body = document.createElement('div');
-      body.className = 'product-card-body';
-
-      var title = document.createElement('div');
-      title.className = 'product-card-title';
-      title.textContent = card.title || 'Untitled gift';
-      body.appendChild(title);
-
-      if (card.merchant) {
-        var merchant = document.createElement('span');
-        merchant.className = 'product-card-merchant';
-        merchant.textContent = card.merchant;
-        body.appendChild(merchant);
-      }
-
-      var price = document.createElement('div');
-      price.className = 'product-card-price';
-      price.textContent = formatPrice(card.price, card.currency);
-      body.appendChild(price);
-
-      var btn = document.createElement('button');
-      btn.className = 'product-card-btn';
-      btn.type = 'button';
-      btn.textContent = 'Gift this';
-      btn.addEventListener('click', function () {
-        sendMessage('I approve: ' + card.title + ' (id ' + card.id + ') at ' + card.price);
-      });
-      body.appendChild(btn);
-
-      cardEl.appendChild(body);
-      row.appendChild(cardEl);
+      row.appendChild(buildCard(card, index));
     });
-
     group.appendChild(row);
+
+    if (hasMore) {
+      appendShowMoreChip(group, row, cards.length);
+    }
+
     scrollToBottom();
+  }
+
+  function appendShowMoreChip(group, row, startIndex) {
+    var existing = group.querySelector('.show-more-chip');
+    if (existing) existing.remove();
+
+    var chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'suggestion-chip show-more-chip';
+    chip.textContent = 'Show more like this';
+    chip.addEventListener('click', function () {
+      chip.disabled = true;
+      chip.textContent = 'Loading…';
+      fetch('/chat/' + conversationId + '/more', { method: 'POST' })
+        .then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          chip.remove();
+          var products = (data && data.products) || [];
+          products.forEach(function (card, i) {
+            row.appendChild(buildCard(card, startIndex + i));
+          });
+          if (data && data.has_more) {
+            appendShowMoreChip(group, row, startIndex + products.length);
+          }
+          scrollToBottom();
+        })
+        .catch(function () {
+          chip.disabled = false;
+          chip.textContent = 'Show more like this';
+        });
+    });
+    group.appendChild(chip);
   }
 
   function labeledRow(label, value) {
@@ -303,6 +372,7 @@
   function updateBudget(budget) {
     if (budget === undefined || budget === null || budget === '') return;
     var num = Number(budget);
+    currentBudget = isNaN(num) ? currentBudget : num;
     var formatted = isNaN(num) ? budget : num.toLocaleString('en-IN');
     budgetAmount.textContent = '₹' + formatted;
     budgetChip.hidden = false;
@@ -333,9 +403,9 @@
       .then(function (data) {
         setTyping(false);
         var group = addBubble('agent', data && data.reply ? data.reply : '');
-        renderCards(group, data && data.cards);
-        renderAction(group, data && data.action);
         updateBudget(data && data.budget);
+        renderCards(group, data && data.cards, data && data.has_more);
+        renderAction(group, data && data.action);
       })
       .catch(function (err) {
         setTyping(false);
