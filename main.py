@@ -845,6 +845,14 @@ class ChatResponse(BaseModel):
 
 app = FastAPI(title="Agentic Gifting")
 
+
+@app.middleware("http")
+async def disable_cache_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
