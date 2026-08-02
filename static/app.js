@@ -150,6 +150,57 @@
   function renderAction(group, action) {
     if (!action) return;
 
+    if (action.type === 'gift_link') {
+      var linkCard = document.createElement('div');
+      linkCard.className = 'gift-link-card';
+
+      var heading = document.createElement('div');
+      heading.className = 'gift-link-heading';
+      heading.textContent = 'Shareable gift link';
+      linkCard.appendChild(heading);
+
+      var desc = document.createElement('div');
+      desc.className = 'gift-link-desc';
+      desc.textContent = 'Send this to the recipient so they can pick their own gift, within budget.';
+      linkCard.appendChild(desc);
+
+      var row = document.createElement('div');
+      row.className = 'gift-link-row';
+
+      var fullUrl = window.location.origin + action.url;
+
+      var urlSpan = document.createElement('span');
+      urlSpan.className = 'gift-link-url';
+      urlSpan.textContent = fullUrl;
+      row.appendChild(urlSpan);
+
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'btn btn-secondary gift-link-copy';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Copy link';
+      copyBtn.addEventListener('click', function () {
+        function showCopied() {
+          copyBtn.textContent = 'Copied!';
+          setTimeout(function () {
+            copyBtn.textContent = 'Copy link';
+          }, 1500);
+        }
+        if (window.navigator.clipboard && window.navigator.clipboard.writeText) {
+          window.navigator.clipboard.writeText(fullUrl).then(showCopied, function () {
+            window.prompt('Copy this link:', fullUrl);
+          });
+        } else {
+          window.prompt('Copy this link:', fullUrl);
+        }
+      });
+      row.appendChild(copyBtn);
+
+      linkCard.appendChild(row);
+      group.appendChild(linkCard);
+      scrollToBottom();
+      return;
+    }
+
     if (action.type === 'approve_payment') {
       var panel = document.createElement('div');
       panel.className = 'action-panel';

@@ -23,8 +23,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,13 @@ MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 MAX_TOKENS = 8192
 MAX_TOOL_ITERATIONS = 10
 DEFAULT_STORE = os.getenv("UCP_DEFAULT_STORE", "giva-jewelry.myshopify.com")
+# Multi-store catalog: when a tool call omits `store`, every one of these is searched
+# concurrently and the results are merged (see _multi_store_search).
+UCP_STORES = [
+    s.strip() for s in
+    os.getenv("UCP_STORES", "giva-jewelry.myshopify.com,mamaearth.in").split(",")
+    if s.strip()
+] or [DEFAULT_STORE]
 CURRENCY = os.getenv("GIFT_CURRENCY", "INR")
 CARD_POLL_TIMEOUT = 10  # seconds — short so the model can poll conversationally
 BUYER_ID = os.getenv("PRAVA_USER_ID", "agentic-gifting-buyer")
@@ -54,6 +63,7 @@ MERCHANT_COUNTRY = os.getenv("PRAVA_MERCHANT_COUNTRY", "IN")
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
+GIFT_HTML = STATIC_DIR / "gift.html"
 
 PRODUCT_FIELDS = (
     "id", "title", "price", "currency", "image_url",
@@ -67,9 +77,21 @@ buyer's budget, so the spend physically cannot exceed what they approved.
 Follow this flow:
 1. Gather the recipient, the budget, and the vibe/occasion. As soon as you know the budget and
    recipient, call `set_gift_context` — no other tool works until you have.
-2. Search ONE store with `search_products` (default store: {DEFAULT_STORE}). Present 2-3 options
-   that are within budget, with prices, and ask the buyer to pick one.
-3. NEVER call `mint_scoped_card` until the buyer has explicitly approved a specific product.
+2. Find out who is picking the gift:
+   * BUYER PICKS (the default — assume this unless told otherwise): search with
+     `search_products`. Omit `store` to search every configured store at once
+     ({', '.join(UCP_STORES)}) concurrently, and tell the buyer which stores you searched. Present
+     2-3 options that are within budget, with prices and which store each is from, and ask the
+     buyer to pick one.
+   * RECIPIENT PICKS ("let them pick", "let her choose", "surprise them", etc.): call
+     `create_gift_link` with a short warm note capturing the occasion/vibe, then give the buyer the
+     returned link to share. Later, when the buyer asks whether the recipient has picked yet, call
+     `get_gift_status` with that token. If nothing is picked, say so warmly and suggest checking
+     back later. Once `get_gift_status` shows a picked product, treat it exactly like the buyer's
+     own explicit approval in step 3 — proceed straight to minting for that exact product, no
+     further confirmation needed.
+3. NEVER call `mint_scoped_card` until a specific product has been explicitly approved — either by
+   the buyer directly, or by the recipient through a gift link (confirmed via `get_gift_status`).
    Mint for the exact price of that product, scoped to that merchant.
 4. After minting, tell the buyer to approve the payment in the Prava window that just opened.
 5. Poll `get_card_status`. While it is pending, tell the buyer to finish the approval. Once it is
@@ -115,9 +137,10 @@ TOOLS: list[dict[str, Any]] = [
           recipient=_field("Who the gift is for."),
           note=_field("Occasion / vibe / preferences.")),
     _tool("search_products",
-          "Search a merchant's live catalog for gift options.",
+          "Search live catalogs for gift options. If `store` is omitted, ALL configured stores "
+          f"({', '.join(UCP_STORES)}) are searched concurrently and the results are merged.",
           ["query"],
-          store=_field(f"Store domain. Default {DEFAULT_STORE}."),
+          store=_field("Store domain. Omit to search every configured store at once."),
           query=_field("What to search for."),
           max_price=_field("Upper price bound.", "number")),
     _tool("get_product",
@@ -141,6 +164,17 @@ TOOLS: list[dict[str, Any]] = [
           "Pay for the approved product with the approved scoped card and return the receipt.",
           ["session_id", "product_url"],
           session_id=_field(), product_url=_field()),
+    _tool("create_gift_link",
+          "Generate a shareable link so the RECIPIENT can pick their own gift, within the "
+          "buyer's budget. Requires set_gift_context to have been called first. Use this when "
+          "the buyer wants the recipient to choose (e.g. 'let them pick').",
+          ["note"],
+          note=_field("A short warm note from the buyer to the recipient (occasion / vibe).")),
+    _tool("get_gift_status",
+          "Check whether the recipient has picked a gift yet on a link made by "
+          "create_gift_link. Returns the picked product if there is one.",
+          ["token"],
+          token=_field("The gift token returned by create_gift_link.")),
 ]
 
 
@@ -161,6 +195,13 @@ class Conversation:
 
 
 CONVERSATIONS: dict[str, Conversation] = {}
+
+# Mode B — "let them pick" gift links. token -> {budget, note, recipient, stores,
+# buyer_conversation_id, status: "awaiting_pick" | "picked", picked_product}.
+# The recipient-facing endpoints (GET/POST /gift/{token}...) only ever read/write
+# `note`, `budget`, `status`, and `picked_product` on this dict — never
+# `buyer_conversation_id`, which stays server-side just like the Prava credential does.
+GIFTS: dict[str, dict[str, Any]] = {}
 
 
 def get_conversation(conversation_id: str) -> Conversation:
@@ -384,44 +425,77 @@ def _within_budget(products: list[dict], max_price: float | None) -> tuple[list[
     return kept, dropped
 
 
+def _multi_store_search(
+    stores: list[str], query: str, max_price: float | None
+) -> tuple[list[dict], dict[str, str], bool]:
+    """Search `stores` for `query`, concurrently when there is more than one.
+
+    Returns (merged_products, degraded_stores, client_missing). `degraded_stores`
+    maps store -> failure reason for stores whose search raised; stores that
+    returned (even an empty list) successfully are not included in it.
+    """
+    client = _load_ucp()
+    if client is None:
+        return [], {}, True
+
+    def _search_one(store: str) -> tuple[str, list[dict], BaseException | None]:
+        try:
+            # Real signature: search_products(store, query, max_price=None, limit=10).
+            # Over-fetch, because the server-side price filter is only a hint and
+            # our own hard filter below will discard the strays.
+            raw = client.search_products(store=store, query=query, max_price=max_price, limit=12)
+            return store, [_fields(p, PRODUCT_FIELDS) for p in (raw or [])], None
+        except Exception as exc:  # noqa: BLE001 — captured per-store, not re-raised
+            return store, [], exc
+
+    if len(stores) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(stores), 8)) as pool:
+            outcomes = list(pool.map(_search_one, stores))
+    else:
+        outcomes = [_search_one(s) for s in stores]
+
+    products: list[dict] = []
+    degraded_stores: dict[str, str] = {}
+    for store, prods, exc in outcomes:
+        if exc is not None:
+            degraded_stores[store] = _mark_degraded("ucp", f"search_products[{store}]", exc)
+        else:
+            products.extend(prods)
+    return products, degraded_stores, False
+
+
 def _tool_search_products(conv: Conversation, args: dict) -> dict:
-    store = args.get("store") or DEFAULT_STORE
+    store_arg = (args.get("store") or "").strip() or None
     query = args.get("query") or ""
     max_price = _parse_amount(args.get("max_price"))
     if conv.budget is not None:
         max_price = min(max_price, conv.budget) if max_price else conv.budget
 
-    client = _load_ucp()
-    products: list[dict] = []
-    degraded: str | None = None
-    if client is not None:
-        try:
-            # Real signature: search_products(store, query, max_price=None, limit=10).
-            # Over-fetch, because the server-side price filter is only a hint and
-            # our own hard filter below will discard the strays.
-            raw = client.search_products(
-                store=store, query=query, max_price=max_price, limit=12
-            )
-            products = [_fields(p, PRODUCT_FIELDS) for p in (raw or [])]
-        except Exception as exc:
-            degraded = _mark_degraded("ucp", "search_products", exc)
+    # Omitting `store` fans the search out across every configured store at once.
+    stores = [store_arg] if store_arg else list(UCP_STORES)
+    products, degraded_stores, client_missing = _multi_store_search(stores, query, max_price)
 
     products, dropped = _within_budget(products, max_price)
-    products = products[:6]
+    products = products[:12]
 
-    result: dict[str, Any] = {"store": store}
-    if client is None or degraded:
-        # Only fake results when the catalog was unusable — an empty result from a
+    result: dict[str, Any] = {"stores_searched": stores}
+    all_failed = client_missing or (bool(degraded_stores) and len(degraded_stores) == len(stores))
+    if all_failed:
+        # Only fake results when every store was unusable — an empty result from a
         # WORKING catalog is real information ("nothing in budget"), not a failure.
-        products = _within_budget(_stub_products(store, query, max_price), max_price)[0]
+        fallback_store = stores[0] if stores else DEFAULT_STORE
+        products = _within_budget(_stub_products(fallback_store, query, max_price), max_price)[0]
         result["stub"] = True
         result["degraded"] = True
-        result["degraded_reason"] = degraded or (
+        result["degraded_reason"] = "; ".join(degraded_stores.values()) if degraded_stores else (
             MODULE_STATUS["ucp"]["detail"] or "UCP catalog client is unavailable"
         )
         result["warning"] = (
             "These products are PLACEHOLDERS, not real catalog data — tell the buyer."
         )
+    elif degraded_stores:
+        # Some stores worked, some didn't — the results are still real, just partial.
+        result["degraded_stores"] = degraded_stores
 
     for p in products:
         price = _parse_amount(p.get("price"))
@@ -435,11 +509,12 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
     if dropped:
         result["filtered_out_over_budget"] = dropped
     if not products and not result.get("stub"):
+        where = f" across {', '.join(stores)}" if len(stores) > 1 else ""
         result["message"] = (
-            f"The catalog returned nothing at or below {max_price:.2f} {CURRENCY} for "
+            f"The catalog{where} returned nothing at or below {max_price:.2f} {CURRENCY} for "
             f"{query!r}. Try a different search, or ask the buyer to raise the budget."
             if max_price is not None
-            else f"The catalog returned no products for {query!r}."
+            else f"The catalog{where} returned no products for {query!r}."
         )
     return result
 
@@ -721,6 +796,45 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
     return outcome
 
 
+def _tool_create_gift_link(conv: Conversation, args: dict) -> dict:
+    """Mode B: mint an unguessable link the recipient can use to pick their own gift."""
+    if conv.budget is None:
+        return {"error": "No budget on record. Call set_gift_context first."}
+    note = (args.get("note") or conv.note or "").strip()
+    token = secrets.token_urlsafe(24)
+    GIFTS[token] = {
+        "budget": conv.budget,
+        "note": note,
+        "recipient": conv.recipient,
+        "stores": list(UCP_STORES),
+        "buyer_conversation_id": conv.id,
+        "status": "awaiting_pick",
+        "picked_product": None,
+    }
+    log.info("created gift link token=%s… budget=%.2f", token[:8], conv.budget)
+    return {
+        "ok": True,
+        "gift_url": f"/gift/{token}",
+        "token": token,
+        "message": "Share this link with the recipient so they can pick their own gift.",
+    }
+
+
+def _tool_get_gift_status(conv: Conversation, args: dict) -> dict:
+    """Mode B: has the recipient picked anything yet on this gift link?"""
+    token = args.get("token") or ""
+    gift = GIFTS.get(token)
+    if gift is None:
+        return {"error": f"Unknown gift token {token!r}."}
+    result: dict[str, Any] = {
+        "status": gift["status"],
+        "picked": gift["picked_product"] is not None,
+    }
+    if gift["picked_product"]:
+        result["picked_product"] = gift["picked_product"]
+    return result
+
+
 TOOL_HANDLERS = {
     "set_gift_context": _tool_set_gift_context,
     "search_products": _tool_search_products,
@@ -728,6 +842,8 @@ TOOL_HANDLERS = {
     "mint_scoped_card": _tool_mint_scoped_card,
     "get_card_status": _tool_get_card_status,
     "complete_checkout": _tool_complete_checkout,
+    "create_gift_link": _tool_create_gift_link,
+    "get_gift_status": _tool_get_gift_status,
 }
 
 
@@ -816,6 +932,8 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
             elif block.name == "complete_checkout" and result.get("success"):
                 action = {"type": "receipt", "order_id": result.get("order_id"),
                           "amount": result.get("amount"), "merchant": result.get("merchant")}
+            elif block.name == "create_gift_link" and result.get("gift_url"):
+                action = {"type": "gift_link", "url": result["gift_url"], "token": result["token"]}
             tool_results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -847,6 +965,16 @@ class ChatResponse(BaseModel):
     action: dict | None = None
     # Optional; WP5's header chip updates from this when present.
     budget: str | None = None
+
+
+class GiftSearchRequest(BaseModel):
+    query: str
+
+
+class GiftPickRequest(BaseModel):
+    product_id: str
+    title: str
+    price: str
 
 
 app = FastAPI(title="Agentic Gifting")
@@ -905,3 +1033,91 @@ def chat(req: ChatRequest) -> ChatResponse:
     conv = get_conversation(req.conversation_id)
     payload = run_agent_turn(conv, req.message)
     return ChatResponse(**payload)
+
+
+# ------------------------------------------------------------- Mode B: gift links
+
+
+def _get_gift_or_404(token: str) -> dict:
+    gift = GIFTS.get(token)
+    if gift is None:
+        raise HTTPException(status_code=404, detail="This gift link is invalid or has expired.")
+    return gift
+
+
+@app.get("/gift/{token}")
+def gift_page(token: str):
+    """Recipient-facing page. The token itself is the only lookup key — no auth,
+    no cookies, no reference back to the buyer's conversation."""
+    if GIFT_HTML.is_file():
+        return FileResponse(str(GIFT_HTML))
+    return PlainTextResponse("Recipient page is not built yet.", status_code=404)
+
+
+@app.get("/gift/{token}/info")
+def gift_info(token: str) -> dict:
+    """Everything the recipient page is allowed to see: note, budget, pick status.
+    Never the buyer's conversation id, store list details beyond what's needed, etc."""
+    gift = _get_gift_or_404(token)
+    return {
+        "budget": gift["budget"],
+        "currency": CURRENCY,
+        "note": gift["note"],
+        "status": gift["status"],
+        "picked_product": gift["picked_product"],
+    }
+
+
+@app.post("/gift/{token}/search")
+def gift_search(token: str, req: GiftSearchRequest) -> dict:
+    """Real, server-side UCP search across the gift's store set, hard budget-filtered.
+    The recipient never gets tool access — this is a plain product search, nothing more."""
+    gift = _get_gift_or_404(token)
+    max_price = gift["budget"]
+    products, degraded_stores, client_missing = _multi_store_search(
+        gift["stores"], req.query, max_price
+    )
+    products, dropped = _within_budget(products, max_price)
+    products = products[:12]
+
+    result: dict[str, Any] = {"stores_searched": gift["stores"]}
+    all_failed = client_missing or (
+        bool(degraded_stores) and len(degraded_stores) == len(gift["stores"])
+    )
+    if all_failed:
+        fallback_store = gift["stores"][0] if gift["stores"] else DEFAULT_STORE
+        products = _within_budget(_stub_products(fallback_store, req.query, max_price), max_price)[0]
+        result["stub"] = True
+
+    result["count"] = len(products)
+    result["products"] = products
+    result["max_price_enforced"] = max_price
+    if dropped:
+        result["filtered_out_over_budget"] = dropped
+    return result
+
+
+@app.post("/gift/{token}/pick")
+def gift_pick(token: str, req: GiftPickRequest) -> dict:
+    """Recipient locks in a choice. Price is re-validated against the buyer's budget
+    here, in code — the recipient's browser is not trusted to enforce that itself."""
+    gift = _get_gift_or_404(token)
+    if gift["status"] == "picked":
+        return {"ok": False, "error": "A gift has already been picked with this link."}
+
+    price = _parse_amount(req.price)
+    if price is None or price <= 0:
+        raise HTTPException(status_code=400, detail="price must be a positive amount.")
+    if price > gift["budget"] + 1e-9:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"That item costs {price:.2f} {CURRENCY}, above the "
+                    f"{gift['budget']:.2f} {CURRENCY} budget."),
+        )
+
+    gift["picked_product"] = {
+        "product_id": req.product_id, "title": req.title, "price": f"{price:.2f}",
+    }
+    gift["status"] = "picked"
+    log.info("gift token=%s… picked product_id=%s", token[:8], req.product_id)
+    return {"ok": True, "status": "picked", "picked_product": gift["picked_product"]}

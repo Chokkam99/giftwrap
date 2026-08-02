@@ -65,7 +65,11 @@ def test_search_products_calls_the_real_ucp_signature(monkeypatch):
     fake.search_products.return_value = [product("1999.00"), product("2500.00")]
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
-    result = main._tool_search_products(conversation(), {"query": "earrings"})
+    # Pin a single store explicitly: omitting it now fans the search out across every
+    # configured store (WP6 multi-store search) — this test is about the per-store wiring.
+    result = main._tool_search_products(
+        conversation(), {"query": "earrings", "store": main.DEFAULT_STORE}
+    )
 
     kwargs = fake.search_products.call_args.kwargs
     assert kwargs["store"] == main.DEFAULT_STORE
@@ -89,7 +93,11 @@ def test_search_hard_filters_over_budget_results(monkeypatch):
     ]
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
-    result = main._tool_search_products(conversation(3000.0), {"query": "necklace"})
+    # Pin a single store: WP6 multi-store search fans out across all configured stores
+    # when store is omitted, which would double-count this mock's fixed return value.
+    result = main._tool_search_products(
+        conversation(3000.0), {"query": "necklace", "store": main.DEFAULT_STORE}
+    )
 
     titles = [p["title"] for p in result["products"]]
     assert titles == ["In budget", "Exactly at budget"]
@@ -102,8 +110,10 @@ def test_explicit_max_price_below_budget_wins(monkeypatch):
     fake.search_products.return_value = [product("1500.00", "Cheap"), product("2900.00", "Pricey")]
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
 
+    # Pin a single store: WP6 multi-store search fans out across all configured stores
+    # when store is omitted, which would double-count this mock's fixed return value.
     result = main._tool_search_products(
-        conversation(3000.0), {"query": "ring", "max_price": 2000}
+        conversation(3000.0), {"query": "ring", "max_price": 2000, "store": main.DEFAULT_STORE}
     )
     assert fake.search_products.call_args.kwargs["max_price"] == 2000.0
     assert [p["title"] for p in result["products"]] == ["Cheap"]
