@@ -656,6 +656,9 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
     credential = record["credential"]
     outcome: dict[str, Any]
     run_checkout = _load_checkout()
+    # CHECKOUT_TOOL_DRY_RUN=1 fills the cart/form but stops before clicking Pay —
+    # required for rehearsals so no real order is ever placed.
+    dry_run = os.getenv("CHECKOUT_TOOL_DRY_RUN", "0") == "1"
     if run_checkout is not None:
         try:
             # Real signature (WP3): run_shopify_checkout(token, dynamic_cvv, expiry_month,
@@ -668,8 +671,11 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
                 expiry_month=credential["expiry_month"],
                 expiry_year=credential["expiry_year"],
                 product_url=product_url,
+                dry_run=dry_run,
             )
             outcome = _fields(raw, ("success", "order_id", "status", "message"))
+            if dry_run:
+                outcome["dry_run"] = True
         except Exception as exc:
             if type(exc).__name__ == "CheckoutError":
                 # A by-design refusal (non dev-store host, missing config) — the
