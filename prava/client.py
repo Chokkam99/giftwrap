@@ -7,6 +7,7 @@ Endpoints used:
   POST /v1/sessions                              -- create_session
   GET  /v1/sessions/{session_id}/payment-result   -- get_payment_result
   POST /v1/sessions/{session_id}/report-status    -- report_status
+  POST /v1/sessions/{session_id}/revoke           -- revoke_session
 
 NEVER log or repr the full `token` / `dynamic_cvv` values -- always mask
 to the last 4 characters when displaying credentials.
@@ -170,6 +171,16 @@ def _parse_transaction(data: dict[str, Any]) -> Transaction:
     )
 
 
+def _parse_session(data: dict[str, Any]) -> Session:
+    return Session(
+        session_id=data["session_id"],
+        session_token=data["session_token"],
+        iframe_url=data["iframe_url"],
+        order_id=data["order_id"],
+        expires_at=data["expires_at"],
+    )
+
+
 def _parse_payment_result(data: dict[str, Any]) -> PaymentResult:
     return PaymentResult(
         session_id=data["session_id"],
@@ -277,13 +288,7 @@ class PravaClient:
             payload["description"] = description
 
         data = self._request("POST", "/v1/sessions", json=payload)
-        return Session(
-            session_id=data["session_id"],
-            session_token=data["session_token"],
-            iframe_url=data["iframe_url"],
-            order_id=data["order_id"],
-            expires_at=data["expires_at"],
-        )
+        return _parse_session(data)
 
     def get_payment_result(self, session_id: str) -> PaymentResult:
         """Poll GET /v1/sessions/{session_id}/payment-result."""
@@ -329,3 +334,16 @@ class PravaClient:
             f"/v1/sessions/{session_id}/report-status",
             json={"txn_ref_id": txn_ref_id, "txn_status": status},
         )
+
+    def revoke_session(self, session_id: str) -> dict[str, Any]:
+        """POST /v1/sessions/{session_id}/revoke -- immediately invalidate a session.
+
+        Sends an explicit empty JSON object body -- the live sandbox rejects
+        a request with `Content-Type: application/json` and a literally
+        empty body (FST_ERR_CTP_EMPTY_JSON_BODY).
+
+        Returns the raw response body (shape not yet formalized into a
+        dataclass since this endpoint is newly validated against the live
+        sandbox).
+        """
+        return self._request("POST", f"/v1/sessions/{session_id}/revoke", json={})
