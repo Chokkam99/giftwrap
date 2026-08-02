@@ -87,18 +87,22 @@
     cardEl.className = 'product-card';
     cardEl.style.animationDelay = index * 70 + 'ms';
 
+    var frame = document.createElement('div');
+    frame.className = 'product-card-image-frame';
     if (card.image_url) {
       var img = document.createElement('img');
       img.className = 'product-card-image';
       img.src = card.image_url;
+      img.loading = 'lazy';
       img.alt = card.title || 'Product image';
       img.addEventListener('error', function () {
         img.replaceWith(placeholderImage());
       });
-      cardEl.appendChild(img);
+      frame.appendChild(img);
     } else {
-      cardEl.appendChild(placeholderImage());
+      frame.appendChild(placeholderImage());
     }
+    cardEl.appendChild(frame);
 
     var body = document.createElement('div');
     body.className = 'product-card-body';
@@ -216,7 +220,24 @@
     return row;
   }
 
-  function renderAction(group, action) {
+  var SHARE_ICONS = {
+    whatsapp:
+      '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M20.5 11.9a8.4 8.4 0 0 1-12.3 7.4L4 20.5l1.3-4a8.4 8.4 0 1 1 15.2-4.6Z"></path>' +
+      '<path d="M9 9.3c0 3.6 3 6.6 6.6 6.6"></path></svg>',
+    messages:
+      '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M4 5h16v11H8l-4 4V5Z"></path></svg>',
+    copy:
+      '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<rect x="9" y="9" width="11" height="11" rx="1.6"></rect>' +
+      '<path d="M5 15V5a1.6 1.6 0 0 1 1.6-1.6H15"></path></svg>',
+  };
+
+  function renderAction(group, action, budget) {
     if (!action) return;
 
     if (action.type === 'gift_link') {
@@ -225,7 +246,7 @@
 
       var heading = document.createElement('div');
       heading.className = 'gift-link-heading';
-      heading.textContent = 'Shareable gift link';
+      heading.textContent = 'Your gift is ready to send';
       linkCard.appendChild(heading);
 
       var desc = document.createElement('div');
@@ -243,15 +264,46 @@
       urlSpan.textContent = fullUrl;
       row.appendChild(urlSpan);
 
+      linkCard.appendChild(row);
+
+      // ---- share sheet: WhatsApp / Messages / Copy — one control group ----
+      var shareRow = document.createElement('div');
+      shareRow.className = 'gift-share-row';
+
+      var messageText =
+        'I sent you a gift 🎁 Pick anything you like' +
+        (budget ? ' up to ₹' + budget : '') +
+        ' — ' + fullUrl;
+      var encodedMessage = encodeURIComponent(messageText);
+
+      var waLink = document.createElement('a');
+      waLink.className = 'btn gift-share-btn';
+      waLink.href = 'https://wa.me/?text=' + encodedMessage;
+      waLink.target = '_blank';
+      waLink.rel = 'noopener';
+      waLink.innerHTML = SHARE_ICONS.whatsapp + '<span>WhatsApp</span>';
+      shareRow.appendChild(waLink);
+
+      var smsLink = document.createElement('a');
+      smsLink.className = 'btn gift-share-btn';
+      smsLink.href = 'sms:&body=' + encodedMessage;
+      smsLink.target = '_blank';
+      smsLink.rel = 'noopener';
+      smsLink.innerHTML = SHARE_ICONS.messages + '<span>Messages</span>';
+      shareRow.appendChild(smsLink);
+
       var copyBtn = document.createElement('button');
-      copyBtn.className = 'btn btn-secondary gift-link-copy';
+      copyBtn.className = 'btn gift-share-btn gift-link-copy';
       copyBtn.type = 'button';
-      copyBtn.textContent = 'Copy link';
+      copyBtn.innerHTML = SHARE_ICONS.copy + '<span>Copy link</span>';
       copyBtn.addEventListener('click', function () {
+        var label = copyBtn.querySelector('span');
         function showCopied() {
-          copyBtn.textContent = 'Copied!';
+          copyBtn.classList.add('copied');
+          label.textContent = 'Copied!';
           setTimeout(function () {
-            copyBtn.textContent = 'Copy link';
+            copyBtn.classList.remove('copied');
+            label.textContent = 'Copy link';
           }, 1500);
         }
         if (window.navigator.clipboard && window.navigator.clipboard.writeText) {
@@ -262,9 +314,9 @@
           window.prompt('Copy this link:', fullUrl);
         }
       });
-      row.appendChild(copyBtn);
+      shareRow.appendChild(copyBtn);
 
-      linkCard.appendChild(row);
+      linkCard.appendChild(shareRow);
       group.appendChild(linkCard);
       scrollToBottom();
       return;
@@ -405,7 +457,7 @@
         var group = addBubble('agent', data && data.reply ? data.reply : '');
         updateBudget(data && data.budget);
         renderCards(group, data && data.cards, data && data.has_more);
-        renderAction(group, data && data.action);
+        renderAction(group, data && data.action, currentBudget);
       })
       .catch(function (err) {
         setTyping(false);
@@ -477,6 +529,19 @@
           order_id: '1001',
           amount: '2499.00',
           merchant: 'GIVA',
+        },
+      };
+    }
+
+    if (/let them pick|gift link|they can pick|pick their own/.test(lower)) {
+      return {
+        reply: "Here's a link you can send them — they'll get to pick anything within budget.",
+        cards: null,
+        budget: '3000',
+        action: {
+          type: 'gift_link',
+          url: '/gift/mock-token-demo123',
+          token: 'mock-token-demo123',
         },
       };
     }
@@ -578,6 +643,32 @@
       "I'll find real products, you approve the one you like, and Prava mints a one-time " +
       'card locked to that exact price and merchant — nothing more can ever be charged.';
     card.appendChild(body);
+
+    var features = document.createElement('ul');
+    features.className = 'welcome-features';
+    [
+      {
+        icon: '<circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m20 20-4.4-4.4"></path>',
+        label: 'Real products, live from 5 stores',
+      },
+      {
+        icon: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"></path><path d="m9 12 2 2 4-4"></path>',
+        label: 'You approve every purchase',
+      },
+      {
+        icon: '<rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path>',
+        label: 'Budget-locked, one-time card',
+      },
+    ].forEach(function (feature) {
+      var li = document.createElement('li');
+      li.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        feature.icon + '</svg><span></span>';
+      li.querySelector('span').textContent = feature.label;
+      features.appendChild(li);
+    });
+    card.appendChild(features);
 
     if (isMock) {
       var note = document.createElement('p');

@@ -28,6 +28,18 @@
   var backdrop = null;
   var panel = null;
   var state = null; // { product, images, index, detail, currency, onApprove }
+  var lastFocused = null; // element to restore focus to once the modal closes
+  var closeTimer = null;
+  var CLOSE_ANIM_MS = 220; // slightly above --duration-base so the CSS transition finishes first
+
+  function focusableIn(container) {
+    var nodes = container.querySelectorAll(
+      'button:not(:disabled), a[href], select, input, [tabindex]:not([tabindex="-1"])'
+    );
+    return Array.prototype.filter.call(nodes, function (el) {
+      return el.offsetParent !== null;
+    });
+  }
 
   function formatPrice(price, currency) {
     if (price === undefined || price === null || price === '') return '';
@@ -62,6 +74,7 @@
     panel.className = 'modal-panel';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('tabindex', '-1');
     backdrop.appendChild(panel);
 
     document.body.appendChild(backdrop);
@@ -70,7 +83,28 @@
       if (e.target === backdrop) close();
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && !backdrop.hidden) close();
+      if (backdrop.hidden || backdrop.classList.contains('closing')) return;
+      if (e.key === 'Escape') {
+        close();
+        return;
+      }
+      // Focus trap: Tab/Shift+Tab cycle within the dialog only.
+      if (e.key === 'Tab') {
+        var focusable = focusableIn(panel);
+        if (!focusable.length) return;
+        var first = focusable[0];
+        var last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        } else if (!panel.contains(document.activeElement)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     });
 
     // Swipe-down-to-close on the sheet (mobile only, CSS gates the layout).
@@ -96,11 +130,20 @@
   }
 
   function close() {
-    if (!backdrop) return;
+    if (!backdrop || backdrop.hidden || backdrop.classList.contains('closing')) return;
+    backdrop.classList.add('closing');
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(finishClose, CLOSE_ANIM_MS);
+  }
+
+  function finishClose() {
     backdrop.hidden = true;
+    backdrop.classList.remove('closing');
     clear(panel);
     document.body.classList.remove('modal-open');
     state = null;
+    if (lastFocused && typeof lastFocused.focus === 'function') lastFocused.focus();
+    lastFocused = null;
   }
 
   function renderCarousel() {
@@ -322,9 +365,16 @@
       },
     };
 
+    clearTimeout(closeTimer);
+    backdrop.classList.remove('closing');
+    lastFocused = document.activeElement;
     backdrop.hidden = false;
     document.body.classList.add('modal-open');
     render();
+    // Move focus into the dialog once it's in the DOM (close button is always
+    // present and is a sensible, discoverable first stop for keyboard users).
+    var closeBtn = panel.querySelector('.modal-close');
+    if (closeBtn) closeBtn.focus();
 
     var store = opts.store || product.merchant;
     if (!store || !product.id) return;

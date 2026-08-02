@@ -39,6 +39,7 @@
     products: [], // all products loaded for the current query+store, unsorted order
     hasMore: false,
     loading: false,
+    searchFailed: false, // true only when the /search request itself errored
   };
 
   // ---------- helpers ----------
@@ -72,6 +73,10 @@
     clear(main);
     var card = document.createElement('div');
     card.className = 'gift-card gift-error';
+    var icon = document.createElement('div');
+    icon.className = 'gift-error-icon';
+    icon.textContent = '!';
+    card.appendChild(icon);
     var h = document.createElement('h2');
     h.textContent = "This link isn't working";
     card.appendChild(h);
@@ -159,10 +164,12 @@
     QUICK_FILTERS.forEach(function (filter) {
       var chip = document.createElement('button');
       chip.type = 'button';
+      chip.dataset.filter = filter.label;
       chip.className = 'suggestion-chip' + (filter.label === state.activeFilter ? ' active' : '');
       chip.textContent = filter.label;
       chip.addEventListener('click', function () {
         state.activeFilter = filter.label;
+        syncControlsActive();
         runSearch(filter.query);
       });
       filterRow.appendChild(chip);
@@ -174,20 +181,24 @@
       storeRow.className = 'gift-store-toggle';
       var allBtn = document.createElement('button');
       allBtn.type = 'button';
+      allBtn.dataset.store = '';
       allBtn.className = 'store-toggle-btn' + (state.selectedStore === '' ? ' active' : '');
       allBtn.textContent = 'All stores';
       allBtn.addEventListener('click', function () {
         state.selectedStore = '';
+        syncControlsActive();
         runSearch(state.query);
       });
       storeRow.appendChild(allBtn);
       state.stores.forEach(function (store) {
         var btn = document.createElement('button');
         btn.type = 'button';
+        btn.dataset.store = store;
         btn.className = 'store-toggle-btn' + (state.selectedStore === store ? ' active' : '');
         btn.textContent = storeLabel(store);
         btn.addEventListener('click', function () {
           state.selectedStore = store;
+          syncControlsActive();
           runSearch(state.query);
         });
         storeRow.appendChild(btn);
@@ -250,23 +261,48 @@
     });
   }
 
+  function skeletonCard() {
+    var card = document.createElement('div');
+    card.className = 'skeleton-card';
+    var img = document.createElement('div');
+    img.className = 'skeleton-block skeleton-image';
+    card.appendChild(img);
+    var body = document.createElement('div');
+    body.className = 'skeleton-body';
+    var l1 = document.createElement('div');
+    l1.className = 'skeleton-line w-100';
+    var l2 = document.createElement('div');
+    l2.className = 'skeleton-line w-70';
+    var l3 = document.createElement('div');
+    l3.className = 'skeleton-line w-40';
+    body.appendChild(l1);
+    body.appendChild(l2);
+    body.appendChild(l3);
+    card.appendChild(body);
+    return card;
+  }
+
   function buildCard(product, index) {
     var card = document.createElement('div');
     card.className = 'product-card';
     card.style.animationDelay = (index % 12) * 60 + 'ms';
 
+    var frame = document.createElement('div');
+    frame.className = 'product-card-image-frame';
     if (product.image_url) {
       var img = document.createElement('img');
       img.className = 'product-card-image';
       img.src = product.image_url;
+      img.loading = 'lazy';
       img.alt = product.title || 'Product image';
       img.addEventListener('error', function () {
         img.replaceWith(placeholderImage());
       });
-      card.appendChild(img);
+      frame.appendChild(img);
     } else {
-      card.appendChild(placeholderImage());
+      frame.appendChild(placeholderImage());
     }
+    card.appendChild(frame);
 
     var body = document.createElement('div');
     body.className = 'product-card-body';
@@ -315,13 +351,52 @@
     if (!grid) return;
     clear(grid);
 
+    if (state.loading) {
+      for (var i = 0; i < 8; i++) {
+        grid.appendChild(skeletonCard());
+      }
+      renderLoadMore();
+      return;
+    }
+
     var products = sortedProducts();
-    if (!products.length) {
-      var empty = document.createElement('p');
-      empty.className = state.loading ? 'gift-loading' : 'gift-empty';
-      empty.textContent = state.loading
-        ? 'Searching…'
-        : 'Nothing found in budget — try another filter or store.';
+    if (state.searchFailed) {
+      var errWrap = document.createElement('div');
+      errWrap.className = 'gift-search-error';
+      var errIcon = document.createElement('div');
+      errIcon.className = 'gift-search-error-icon';
+      errIcon.textContent = '⚠';
+      errWrap.appendChild(errIcon);
+      var errMsg = document.createElement('p');
+      errMsg.textContent = "Couldn't reach the shops just now.";
+      errWrap.appendChild(errMsg);
+      var errSub = document.createElement('p');
+      errSub.className = 'gift-empty-sub';
+      errSub.textContent = 'Check your connection and try that filter again.';
+      errWrap.appendChild(errSub);
+      var retryBtn = document.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.className = 'btn btn-secondary gift-load-more-btn';
+      retryBtn.textContent = 'Try again';
+      retryBtn.addEventListener('click', function () {
+        runSearch(state.query);
+      });
+      errWrap.appendChild(retryBtn);
+      grid.appendChild(errWrap);
+    } else if (!products.length) {
+      var empty = document.createElement('div');
+      empty.className = 'gift-empty';
+      var emptyIcon = document.createElement('div');
+      emptyIcon.className = 'gift-empty-icon';
+      emptyIcon.textContent = '🔍';
+      empty.appendChild(emptyIcon);
+      var emptyMsg = document.createElement('p');
+      emptyMsg.textContent = 'Nothing found in budget.';
+      empty.appendChild(emptyMsg);
+      var emptySub = document.createElement('p');
+      emptySub.className = 'gift-empty-sub';
+      emptySub.textContent = 'Try another filter, store, or a wider search.';
+      empty.appendChild(emptySub);
       grid.appendChild(empty);
     } else {
       products.forEach(function (product, index) {
@@ -371,6 +446,7 @@
     state.products = [];
     state.hasMore = false;
     state.loading = true;
+    state.searchFailed = false;
     renderGrid();
 
     var body = { query: trimmed };
@@ -395,6 +471,7 @@
         state.loading = false;
         state.products = [];
         state.hasMore = false;
+        state.searchFailed = true;
         renderGrid();
       });
   }

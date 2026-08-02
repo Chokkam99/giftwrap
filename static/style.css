@@ -1,5 +1,11 @@
+/* ==========================================================================
+   GiftWrap — design tokens
+   Warm gifting palette: deep forest green + cream paper + gold accents.
+   Every component below consumes these tokens; no bare hex/px should creep
+   back into component rules.
+   ========================================================================== */
 :root {
-  /* Warm gifting palette: deep forest green + cream paper + gold accents. */
+  /* ---- Brand colors ---- */
   --forest-950: #0f2016;
   --forest-900: #16311f;
   --forest-800: #1e4029;
@@ -8,6 +14,7 @@
   --forest-500: #4d8259;
 
   --gold-300: #e8cf94;
+  --gold-400: #d9b565;
   --gold-500: #c89a3c;
   --gold-600: #b1832a;
   --gold-700: #8f6a20;
@@ -16,31 +23,101 @@
   --cream-100: #fbf6ea;
   --cream-200: #f3ead3;
 
-  --ink: #202b21;
-  --ink-muted: #656f5f;
-  --border: #e4dcc4;
+  /* ---- Neutrals (paper-tinted, not pure gray, so they sit with the palette) --- */
+  --neutral-100: #f3f1ea;
+  --neutral-200: #e6e2d4;
+  --neutral-300: #d3cdb9;
+  --neutral-500: #8b8874;
+  --neutral-700: #565442;
 
+  --ink: #202b21;
+  --ink-muted: #5b6455;
+  --ink-faint: #8a9282;
+  --border: #e4dcc4;
+  --border-strong: #d6c9a0;
+
+  /* ---- Semantic ---- */
   --success: #2f7a4d;
+  --success-bg: #e3f2e8;
   --danger: #b3432f;
+  --danger-bg: #fbeae6;
+  --info: #2e6a8f;
+  --info-bg: #e6f1f7;
 
   --bg: var(--cream-200);
   --surface: var(--cream-50);
+  --surface-raised: var(--cream-50);
   --text: var(--ink);
   --text-muted: var(--ink-muted);
+  --text-faint: var(--ink-faint);
   --accent: var(--forest-800);
 
-  --radius-lg: 18px;
-  --radius-md: 13px;
-  --radius-sm: 9px;
-  --shadow: 0 1px 3px rgba(30, 26, 10, 0.09), 0 1px 2px rgba(30, 26, 10, 0.05);
-  --shadow-md: 0 8px 24px rgba(22, 40, 25, 0.14);
-  --shadow-lift: 0 12px 28px rgba(22, 40, 25, 0.18);
+  /* ---- Spacing scale (4/8px base) ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 48px;
+  --space-10: 64px;
 
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
+  /* ---- Type scale (~1.2 ratio) ---- */
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 17px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.6;
+
+  --font-display: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* ---- Radius family ---- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-xl: 22px;
+  --radius-full: 999px;
+
+  /* ---- Elevation (3 levels, warm-tinted shadows) ---- */
+  --shadow-1: 0 1px 2px rgba(23, 29, 20, 0.07), 0 1px 1px rgba(23, 29, 20, 0.04);
+  --shadow-2: 0 6px 18px rgba(20, 32, 22, 0.11), 0 2px 6px rgba(20, 32, 22, 0.06);
+  --shadow-3: 0 20px 44px rgba(15, 28, 19, 0.20), 0 6px 16px rgba(15, 28, 19, 0.10);
+
+  /* legacy aliases kept so any stray reference still resolves */
+  --shadow: var(--shadow-1);
+  --shadow-md: var(--shadow-2);
+  --shadow-lift: var(--shadow-3);
+
+  /* ---- Motion ---- */
+  --ease: cubic-bezier(0.22, 0.8, 0.32, 1);
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+
+  /* ---- Layout ---- */
+  --container-chat: 720px;
+  --container-gift: 1080px;
+  --header-h: 64px;
+
+  font-family: var(--font-sans);
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -54,43 +131,137 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
+body {
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+}
+
+img {
+  max-width: 100%;
+}
+
+::selection {
+  background: var(--gold-300);
+  color: var(--forest-950);
+}
+
+/* Slim, tasteful scrollbars on the two vertical scroll surfaces */
+.chat-log,
+.gift-main,
+.modal-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.chat-log::-webkit-scrollbar,
+.gift-main::-webkit-scrollbar,
+.modal-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-log::-webkit-scrollbar-thumb,
+.gift-main::-webkit-scrollbar-thumb,
+.modal-panel::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.chat-log::-webkit-scrollbar-track,
+.gift-main::-webkit-scrollbar-track,
+.modal-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Global focus-visible ring — every interactive element gets this, once. */
+:focus-visible {
+  outline: 2px solid var(--forest-600);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Numerals used for money should never jitter as digits change. */
+.tabular,
+.product-card-price,
+.modal-price,
+.gift-budget-line,
+.receipt-row,
+#budget-amount,
+.gift-picked-product {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ==========================================================================
+   App shells
+   ========================================================================== */
 .app {
-  max-width: 720px;
+  max-width: var(--container-chat);
   margin: 0 auto;
-  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  background-image: radial-gradient(circle at 1px 1px, rgba(30, 64, 41, 0.055) 1px, transparent 0);
+  background-image: radial-gradient(circle at 1px 1px, rgba(30, 64, 41, 0.05) 1px, transparent 0);
   background-size: 22px 22px;
 }
 
 /* The recipient page is a browsing surface, not a chat thread — give the
-   grid room to actually show 3-4 columns on desktop instead of the chat's
+   grid room to actually show 3-5 columns on desktop instead of the chat's
    narrow single-column shell. */
 .app.gift-app {
-  max-width: 1080px;
+  max-width: var(--container-gift);
 }
 
-/* Header */
+@media (min-width: 1600px) {
+  .app {
+    max-width: 780px;
+  }
+
+  .app.gift-app {
+    max-width: 1240px;
+  }
+}
+
+/* ==========================================================================
+   Header
+   ========================================================================== */
 .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 14px 20px;
-  background: var(--surface);
-  border-bottom: 2px solid var(--gold-500);
-  box-shadow: var(--shadow);
-  z-index: 2;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  min-height: var(--header-h);
+  background: rgba(255, 253, 248, 0.86);
+  backdrop-filter: blur(10px) saturate(1.1);
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
+  position: relative;
+  z-index: 20;
+  flex-shrink: 0;
+}
+
+.app-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--gold-500), var(--gold-300) 60%, transparent);
 }
 
 .app-header-brand {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: var(--space-3);
   min-width: 0;
 }
 
@@ -98,43 +269,51 @@ body {
   flex-shrink: 0;
   width: 36px;
   height: 36px;
-  border-radius: 10px;
-  background: var(--forest-800);
+  border-radius: var(--radius-md);
+  background: linear-gradient(155deg, var(--forest-700), var(--forest-950));
   color: var(--gold-300);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
+}
+
+.app-header-titles {
+  min-width: 0;
 }
 
 .app-header-titles h1 {
   margin: 0;
-  font-size: 19px;
-  font-weight: 800;
-  letter-spacing: -0.01em;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.015em;
   color: var(--forest-800);
 }
 
 .subtitle {
   margin: 1px 0 0;
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .budget-chip {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   background: var(--forest-800);
   color: var(--gold-300);
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  padding: 7px 13px;
-  border-radius: 999px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
   white-space: nowrap;
-  box-shadow: var(--shadow);
-  animation: chip-in 0.35s ease both;
+  box-shadow: var(--shadow-1);
+  animation: chip-in var(--duration-slow) var(--ease) both;
 }
 
 .budget-chip-icon {
@@ -158,20 +337,23 @@ body {
   }
 }
 
-/* Chat log */
+/* ==========================================================================
+   Chat log
+   ========================================================================== */
 .chat-log {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  overflow-x: hidden;
+  padding: var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-4);
 }
 
 .msg-row {
   display: flex;
   width: 100%;
-  animation: msg-in 0.28s ease both;
+  animation: msg-in var(--duration-slow) var(--ease) both;
 }
 
 @keyframes msg-in {
@@ -197,17 +379,17 @@ body {
   max-width: 84%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .msg-bubble {
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
-  line-height: 1.45;
-  font-size: 15px;
+  line-height: var(--leading-relaxed);
+  font-size: var(--text-md);
   white-space: pre-wrap;
   word-wrap: break-word;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
 }
 
 .msg-row.buyer .msg-bubble {
@@ -223,83 +405,152 @@ body {
   border: 1px solid var(--border);
 }
 
+.msg-bubble.error {
+  border-left: 3px solid var(--danger);
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
 /* Welcome / empty state */
 .welcome-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 22px 22px 18px;
-  box-shadow: var(--shadow);
+  padding: var(--space-6) var(--space-6) var(--space-5);
+  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  animation: msg-in 0.32s ease both;
+  gap: var(--space-3);
+  animation: msg-in calc(var(--duration-slow) + 70ms) var(--ease) both;
 }
 
 .welcome-icon {
   width: 46px;
   height: 46px;
-  border-radius: 12px;
-  background: linear-gradient(155deg, var(--forest-700), var(--forest-900));
+  border-radius: var(--radius-md);
+  background: linear-gradient(155deg, var(--forest-700), var(--forest-950));
   color: var(--gold-300);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
 }
 
 .welcome-card h2 {
   margin: 0;
-  font-size: 16.5px;
+  font-size: var(--text-lg);
   font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--forest-800);
 }
 
 .welcome-card p {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
   color: var(--text-muted);
 }
 
 .welcome-note {
-  font-size: 12px;
+  font-size: var(--text-sm);
   font-style: italic;
   color: var(--gold-700);
+}
+
+/* The chat welcome card is effectively GiftWrap's landing page — there is no
+   separate marketing page — so it carries a short trust/feature strip. */
+.welcome-features {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.welcome-features li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--forest-700);
+}
+
+.welcome-features svg {
+  flex-shrink: 0;
+  color: var(--gold-600);
 }
 
 .welcome-suggestions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 2px;
 }
 
-.suggestion-chip {
+/* ==========================================================================
+   Chip / pill control family — suggestion chips, gift quick filters, store
+   toggle and the sort select all share one visual language so the recipient
+   controls "read as one family" (WP-UIREFINE item 4).
+   ========================================================================== */
+.suggestion-chip,
+.store-toggle-btn {
   border: 1px solid var(--border);
   background: var(--cream-100);
   color: var(--forest-800);
-  font-size: 12.5px;
+  font: inherit;
+  font-size: var(--text-sm);
   font-weight: 600;
-  padding: 7px 12px;
-  border-radius: 999px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+  transition: background var(--duration-fast) var(--ease),
+    border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
 }
 
-.suggestion-chip:hover {
+.suggestion-chip:hover,
+.store-toggle-btn:hover {
   background: var(--gold-300);
   border-color: var(--gold-500);
   transform: translateY(-1px);
 }
 
-/* Typing indicator */
+.suggestion-chip:active,
+.store-toggle-btn:active {
+  transform: translateY(0);
+}
+
+.suggestion-chip.active,
+.store-toggle-btn.active {
+  background: var(--forest-800);
+  border-color: var(--forest-800);
+  color: var(--gold-300);
+}
+
+.suggestion-chip.active:hover,
+.store-toggle-btn.active:hover {
+  background: var(--forest-700);
+  border-color: var(--forest-700);
+}
+
+.suggestion-chip:disabled,
+.store-toggle-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+  transform: none;
+}
+
+/* ==========================================================================
+   Typing indicator
+   ========================================================================== */
 .typing-indicator {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
-  padding: 0 20px 10px;
-  animation: msg-in 0.2s ease both;
+  padding: 0 var(--space-5) var(--space-3);
+  animation: msg-in var(--duration-base) var(--ease) both;
 }
 
 .typing-avatar {
@@ -332,7 +583,9 @@ body {
 }
 
 @keyframes blink {
-  0%, 80%, 100% {
+  0%,
+  80%,
+  100% {
     opacity: 0.3;
     transform: translateY(0);
   }
@@ -342,58 +595,76 @@ body {
   }
 }
 
-/* Input row */
+/* ==========================================================================
+   Input row
+   ========================================================================== */
 .chat-input-row {
   display: flex;
-  gap: 10px;
-  padding: 14px 20px;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
   background: var(--surface);
   border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 #chat-input {
   flex: 1;
-  padding: 12px 14px;
+  min-width: 0;
+  padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  font-size: 15px;
+  font: inherit;
+  font-size: var(--text-md);
   outline: none;
   background: var(--cream-100);
   color: var(--text);
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--duration-fast) var(--ease),
+    background var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
 }
 
 #chat-input::placeholder {
-  color: #98a291;
+  color: var(--text-faint);
+}
+
+#chat-input:hover:not(:focus) {
+  border-color: var(--border-strong);
 }
 
 #chat-input:focus {
   border-color: var(--forest-600);
   background: var(--surface);
+  box-shadow: 0 0 0 3px rgba(57, 107, 71, 0.14);
+}
+
+#chat-input:disabled {
+  opacity: 0.65;
 }
 
 #send-btn {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 18px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
   border: none;
   border-radius: var(--radius-sm);
   background: var(--gold-600);
   color: var(--forest-950);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--text-md);
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: background var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 #send-btn:hover:not(:disabled) {
   background: var(--gold-500);
   transform: translateY(-1px);
+  box-shadow: var(--shadow-1);
 }
 
 #send-btn:active:not(:disabled) {
   transform: translateY(0);
+  box-shadow: none;
 }
 
 #send-btn:disabled {
@@ -401,44 +672,118 @@ body {
   cursor: not-allowed;
 }
 
-#chat-input:focus-visible,
-#send-btn:focus-visible,
-.product-card-btn:focus-visible,
-.btn:focus-visible,
-.suggestion-chip:focus-visible {
-  outline: 2px solid var(--forest-600);
-  outline-offset: 2px;
+/* ==========================================================================
+   Buttons (approval panel, receipts, modal CTA, copy, load more…)
+   ========================================================================== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: none;
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease),
+    opacity var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease);
 }
 
-/* Product cards */
+.btn-primary {
+  background: var(--gold-500);
+  color: var(--forest-950);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--gold-300);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-1);
+}
+
+.btn-secondary {
+  background: rgba(251, 246, 234, 0.1);
+  color: var(--cream-100);
+  border: 1px solid rgba(251, 246, 234, 0.35);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: rgba(251, 246, 234, 0.18);
+  transform: translateY(-1px);
+}
+
+/* Secondary button used outside the dark action panel (load-more, copy link)
+   needs its own light-surface treatment — same shape, different contrast. */
+.gift-load-more-btn,
+.gift-link-copy {
+  background: var(--surface);
+  color: var(--forest-800);
+  border: 1px solid var(--border-strong);
+}
+
+.gift-load-more-btn:hover:not(:disabled),
+.gift-link-copy:hover:not(:disabled) {
+  background: var(--gold-300);
+  border-color: var(--gold-500);
+  transform: translateY(-1px);
+}
+
+.gift-link-copy.copied {
+  background: var(--success-bg);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ==========================================================================
+   Product cards — shared by buyer chat (card-row) and the recipient grid.
+   ========================================================================== */
 .card-row {
   display: flex;
-  gap: 12px;
+  gap: var(--space-3);
   overflow-x: auto;
-  padding: 4px 2px 8px;
+  overflow-y: hidden;
+  padding: var(--space-1) 2px var(--space-2);
   scroll-snap-type: x proximity;
 }
 
 .product-card {
   flex: 0 0 auto;
-  width: 190px;
+  width: 192px;
   scroll-snap-align: start;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
   opacity: 0;
   transform: translateY(10px);
-  animation: card-in 0.35s ease forwards;
-  transition: box-shadow 0.18s ease, transform 0.18s ease;
+  animation: card-in var(--duration-slow) var(--ease) forwards;
+  transition: box-shadow var(--duration-base) var(--ease), transform var(--duration-base) var(--ease),
+    border-color var(--duration-base) var(--ease);
+  cursor: pointer;
 }
 
 .product-card:hover {
-  box-shadow: var(--shadow-lift);
+  box-shadow: var(--shadow-3);
   transform: translateY(-3px);
+  border-color: var(--border-strong);
+}
+
+.product-card:focus-within {
+  border-color: var(--forest-600);
 }
 
 @keyframes card-in {
@@ -448,17 +793,31 @@ body {
   }
 }
 
+.product-card-image-frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  background: var(--cream-200);
+}
+
 .product-card-image {
   width: 100%;
-  height: 130px;
+  height: 100%;
   object-fit: cover;
-  background: var(--cream-200);
   display: block;
+  transition: transform var(--duration-slow) var(--ease);
+}
+
+.product-card:hover .product-card-image {
+  transform: scale(1.06);
 }
 
 .product-card-image-placeholder {
   width: 100%;
-  height: 130px;
+  height: 100%;
+  position: absolute;
+  inset: 0;
   background: linear-gradient(140deg, var(--cream-200), var(--gold-300) 160%);
   display: flex;
   align-items: center;
@@ -467,71 +826,153 @@ body {
 }
 
 .product-card-body {
-  padding: 10px 12px 12px;
+  padding: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-2);
   flex: 1;
 }
 
 .product-card-title {
-  font-size: 13.5px;
+  font-size: var(--text-sm);
   font-weight: 600;
-  line-height: 1.3;
-  min-height: 34px;
+  line-height: var(--leading-snug);
+  min-height: 2.6em;
   color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .product-card-merchant {
   align-self: flex-start;
-  font-size: 10.5px;
+  font-size: var(--text-xs);
   font-weight: 700;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--forest-700);
   background: var(--cream-200);
-  padding: 3px 8px;
-  border-radius: 999px;
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-full);
 }
 
 .product-card-price {
-  font-size: 15px;
+  font-size: var(--text-md);
   font-weight: 800;
   color: var(--forest-800);
+  margin-top: auto;
 }
 
 .product-card-btn {
-  margin-top: auto;
-  padding: 9px 10px;
+  padding: var(--space-2) var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: var(--gold-600);
   color: var(--forest-950);
-  font-size: 13px;
+  font: inherit;
+  font-size: var(--text-sm);
   font-weight: 700;
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: background var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
 }
 
-.product-card-btn:hover {
+.product-card-btn:hover:not(:disabled) {
   background: var(--gold-500);
   transform: translateY(-1px);
 }
 
-.product-card-btn:active {
+.product-card-btn:active:not(:disabled) {
   transform: translateY(0);
 }
 
-/* Action panels (Prava approval — a deliberate "security moment") */
+.product-card-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ---- Skeleton loading cards (product fetch in flight) ---- */
+.skeleton-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.skeleton-card .skeleton-block {
+  position: relative;
+  overflow: hidden;
+  background: var(--neutral-200);
+}
+
+.skeleton-card .skeleton-image {
+  aspect-ratio: 1 / 1;
+}
+
+.skeleton-card .skeleton-body {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.skeleton-card .skeleton-line {
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--neutral-200);
+  position: relative;
+  overflow: hidden;
+}
+
+.skeleton-card .skeleton-line.w-70 {
+  width: 70%;
+}
+
+.skeleton-card .skeleton-line.w-40 {
+  width: 40%;
+  height: 14px;
+  margin-top: var(--space-1);
+}
+
+.skeleton-card .skeleton-line.w-100 {
+  width: 100%;
+}
+
+.skeleton-block::after,
+.skeleton-line::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.55),
+    transparent
+  );
+  animation: shimmer 1.4s infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* ==========================================================================
+   Action panels (Prava approval — a deliberate "security moment")
+   ========================================================================== */
 .action-panel {
   background: linear-gradient(165deg, var(--forest-800), var(--forest-950));
   border: 1px solid var(--forest-900);
   border-radius: var(--radius-md);
-  padding: 18px 18px 16px;
-  box-shadow: var(--shadow-md);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  box-shadow: var(--shadow-2);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   max-width: 100%;
   color: var(--cream-100);
   position: relative;
@@ -555,14 +996,14 @@ body {
 .action-panel-heading {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .action-panel-icon {
   flex-shrink: 0;
   width: 34px;
   height: 34px;
-  border-radius: 9px;
+  border-radius: var(--radius-sm);
   background: rgba(200, 154, 60, 0.16);
   border: 1px solid rgba(200, 154, 60, 0.4);
   color: var(--gold-300);
@@ -573,77 +1014,43 @@ body {
 
 .action-panel-title {
   font-weight: 700;
-  font-size: 15.5px;
+  font-size: var(--text-md);
+  letter-spacing: -0.005em;
   color: #fff;
 }
 
 .action-panel-desc {
-  font-size: 13px;
-  line-height: 1.5;
-  color: rgba(251, 246, 234, 0.72);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: rgba(251, 246, 234, 0.8);
+  position: relative;
 }
 
 .action-panel-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 4px;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
   position: relative;
 }
 
-.btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 10px 16px;
-  border-radius: var(--radius-sm);
-  border: none;
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  transition: transform 0.15s ease, background 0.15s ease, opacity 0.15s ease;
-}
-
-.btn-primary {
-  background: var(--gold-500);
-  color: var(--forest-950);
-}
-
-.btn-primary:hover {
-  background: var(--gold-300);
-  transform: translateY(-1px);
-}
-
-.btn-secondary {
-  background: rgba(251, 246, 234, 0.1);
-  color: var(--cream-100);
-  border: 1px solid rgba(251, 246, 234, 0.35);
-}
-
-.btn-secondary:hover {
-  background: rgba(251, 246, 234, 0.18);
-  transform: translateY(-1px);
-}
-
-.btn:active {
-  transform: translateY(0);
-}
-
-/* Receipt card — perforated paper feel */
+/* ==========================================================================
+   Receipt card — perforated paper feel
+   ========================================================================== */
 .receipt-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 26px 22px 20px;
-  box-shadow: var(--shadow-md);
+  padding: var(--space-7) var(--space-5) var(--space-5);
+  box-shadow: var(--shadow-2);
   text-align: center;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1);
   max-width: 320px;
   position: relative;
-  animation: receipt-in 0.4s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  animation: receipt-in var(--duration-slow) var(--ease) both;
 }
 
 @keyframes receipt-in {
@@ -682,24 +1089,25 @@ body {
   width: 52px;
   height: 52px;
   border-radius: 50%;
-  background: #e2f1e6;
+  background: var(--success-bg);
   color: var(--success);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .receipt-title {
-  font-weight: 800;
-  font-size: 16px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--text-lg);
   color: var(--forest-800);
 }
 
 .receipt-details {
   width: 100%;
-  margin: 6px 0 2px;
-  padding-top: 10px;
+  margin: var(--space-2) 0 2px;
+  padding-top: var(--space-3);
   border-top: 1px dashed var(--border);
 }
 
@@ -707,10 +1115,10 @@ body {
   display: flex;
   justify-content: space-between;
   width: 100%;
-  font-size: 13px;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: var(--text-base);
+  font-family: var(--font-mono);
   color: var(--text-muted);
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }
 
 .receipt-row span:last-child {
@@ -719,8 +1127,8 @@ body {
 }
 
 .receipt-footer {
-  margin-top: 10px;
-  font-size: 14px;
+  margin-top: var(--space-3);
+  font-size: var(--text-md);
   font-weight: 700;
   color: var(--forest-800);
 }
@@ -736,109 +1144,168 @@ body {
   cursor: default;
 }
 
-/* Gift link card (Mode B — buyer shares this so the recipient can pick) */
+/* ==========================================================================
+   Gift link card (Mode B — buyer shares this so the recipient can pick)
+   ========================================================================== */
 .gift-link-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  padding: 16px 18px;
-  box-shadow: var(--shadow);
+  padding: var(--space-4) var(--space-5);
+  box-shadow: var(--shadow-1);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-3);
   max-width: 100%;
 }
 
 .gift-link-heading {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--text-md);
   color: var(--forest-800);
 }
 
 .gift-link-heading::before {
   content: "🎁";
-  font-size: 16px;
+  font-size: var(--text-lg);
 }
 
 .gift-link-desc {
-  font-size: 13px;
+  font-size: var(--text-base);
   color: var(--text-muted);
-  line-height: 1.4;
+  line-height: var(--leading-normal);
 }
 
 .gift-link-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
   background: var(--cream-100);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 8px 8px 8px 12px;
+  border-radius: var(--radius-full);
+  padding: var(--space-2) var(--space-4);
 }
 
 .gift-link-url {
   flex: 1;
   min-width: 0;
-  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   color: var(--forest-800);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.gift-link-copy {
-  flex-shrink: 0;
-  padding: 8px 14px;
-  font-size: 13px;
-  background: var(--gold-600);
-  color: var(--forest-950);
+/* ---- Share sheet: WhatsApp / Messages / Copy — one control group ---- */
+.gift-share-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
-.gift-link-copy:hover {
-  background: var(--gold-500);
+.gift-share-btn {
+  flex: 1 1 0;
+  min-width: 100px;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  background: var(--surface);
+  color: var(--forest-800);
+  border: 1px solid var(--border-strong);
+  text-decoration: none;
 }
 
-/* Recipient page (Mode B — /gift/{token}) */
+.gift-share-btn:hover {
+  background: var(--gold-300);
+  border-color: var(--gold-500);
+  transform: translateY(-1px);
+}
+
+.gift-share-btn:active {
+  transform: translateY(0);
+}
+
+.gift-share-btn.copied {
+  background: var(--success-bg);
+  border-color: var(--success);
+  color: var(--success);
+}
+
+@media (max-width: 375px) {
+  .gift-share-row {
+    flex-direction: column;
+  }
+
+  .gift-share-btn {
+    width: 100%;
+  }
+}
+
+/* ==========================================================================
+   Recipient page (Mode B — /gift/{token})
+   ========================================================================== */
 .gift-main {
   flex: 1;
   overflow-y: auto;
-  padding: 24px 20px 40px;
+  overflow-x: hidden;
+  /* NOTE: no top padding here on purpose — .gift-controls below is a sticky
+     child of THIS element, and a scroll container's own padding-box is what
+     position:sticky clamps against. Top padding here would reappear as a
+     permanent gap between the header and the stuck bar, with grid content
+     visibly scrolling through it (the WP-UIREFINE #8 bug). Vertical spacing
+     before the first section is done with margin on .gift-hero instead. */
+  padding: 0 var(--space-5) var(--space-8);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
+  gap: var(--space-5);
 }
 
 .gift-state {
   color: var(--text-muted);
-  font-size: 14px;
-  margin-top: 40px;
+  font-size: var(--text-base);
+  margin-top: var(--space-9);
 }
 
 .gift-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 24px;
-  box-shadow: var(--shadow);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-1);
   max-width: 420px;
   width: 100%;
   text-align: center;
+  margin-top: var(--space-8);
+}
+
+.gift-error-icon {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto var(--space-3);
+  border-radius: 50%;
+  background: var(--danger-bg);
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .gift-error h2 {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
   color: var(--danger);
-  font-size: 17px;
+  font-size: var(--text-lg);
 }
 
 .gift-error p {
   margin: 0;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
 }
 
 .gift-hero {
@@ -846,6 +1313,19 @@ body {
   width: 100%;
   text-align: center;
   align-items: center;
+  margin-top: var(--space-6);
+  animation: gift-hero-in 0.5s var(--ease) both;
+}
+
+@keyframes gift-hero-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .gift-hero-icon {
@@ -855,80 +1335,60 @@ body {
 }
 
 .gift-hero h2 {
-  margin: 4px 0 0;
-  font-size: 20px;
-  font-weight: 800;
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--forest-800);
 }
 
 .gift-note {
-  margin: 4px 0 0;
+  margin: var(--space-1) 0 0;
   font-style: italic;
   color: var(--text-muted);
-  font-size: 14.5px;
-  line-height: 1.5;
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
 }
 
 .gift-budget-line {
   margin: 2px 0 0;
   font-weight: 700;
   color: var(--gold-700);
-  font-size: 14.5px;
+  font-size: var(--text-md);
 }
 
-/* Recipient browsing controls (WP-BROWSE) — pinned while the grid scrolls */
+/* Recipient browsing controls (WP-BROWSE) — pinned while the grid scrolls.
+   This is the single sticky container (budget line + filters + store toggle
+   + sort all live inside it), so there's exactly one stuck offset to reason
+   about and no stacked-sticky math to get wrong. */
 .gift-controls {
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: 10;
   width: 100%;
   max-width: 1040px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  padding: 12px 14px 14px;
-  background: var(--bg);
+  gap: var(--space-3);
+  padding: var(--space-4) 0;
+  background: rgba(243, 234, 211, 0.92);
+  backdrop-filter: blur(10px) saturate(1.1);
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-1);
 }
 
 .gift-chips {
   justify-content: center;
 }
 
-.suggestion-chip.active {
-  background: var(--forest-800);
-  border-color: var(--forest-800);
-  color: var(--gold-300);
-}
-
 .gift-store-toggle {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 6px;
-}
-
-.store-toggle-btn {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 5px 11px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-
-.store-toggle-btn:hover {
-  border-color: var(--gold-500);
-}
-
-.store-toggle-btn.active {
-  background: var(--gold-500);
-  border-color: var(--gold-500);
-  color: var(--forest-950);
+  gap: var(--space-2);
 }
 
 .gift-sort-row {
@@ -939,31 +1399,41 @@ body {
 .gift-sort-label {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-muted);
 }
 
 .gift-sort-select {
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  padding: 6px var(--space-6) 6px var(--space-3);
+  border-radius: var(--radius-full);
   border: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--surface)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%232a5236' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    no-repeat right 10px center;
   color: var(--text);
-  font-size: 12.5px;
+  font: inherit;
+  font-size: var(--text-sm);
   font-weight: 600;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  transition: border-color var(--duration-fast) var(--ease);
 }
 
-/* Responsive grid: 2 columns on mobile, 3-4 on desktop */
+.gift-sort-select:hover {
+  border-color: var(--border-strong);
+}
+
+/* Responsive grid: 2 columns on mobile, up to 5 on very wide desktop */
 .gift-grid {
   max-width: 1040px;
   width: 100%;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  padding: 4px 2px;
+  gap: var(--space-4);
+  padding: var(--space-1) 2px;
 }
 
 .gift-grid .product-card {
@@ -982,57 +1452,96 @@ body {
   }
 }
 
+@media (min-width: 1600px) {
+  .gift-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 .gift-grid .gift-empty,
-.gift-grid .gift-loading {
+.gift-grid .gift-search-error {
   grid-column: 1 / -1;
 }
 
 .gift-empty,
-.gift-loading {
+.gift-search-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--text-muted);
-  font-size: 14px;
-  padding: 20px 0;
+  font-size: var(--text-base);
+  padding: var(--space-8) 0;
   text-align: center;
+}
+
+.gift-empty-icon,
+.gift-search-error-icon {
+  font-size: 26px;
+  opacity: 0.7;
+}
+
+.gift-search-error {
+  color: var(--danger);
+}
+
+.gift-search-error .gift-empty-sub,
+.gift-empty .gift-empty-sub {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
 }
 
 .gift-load-more-wrap {
   display: flex;
   justify-content: center;
-  padding: 6px 0 30px;
+  padding: var(--space-2) 0 var(--space-7);
 }
 
 .gift-load-more-btn {
-  padding: 10px 22px;
+  padding: var(--space-3) var(--space-6);
 }
 
 .gift-picked-card {
-  margin-top: 20px;
+  margin-top: var(--space-6);
 }
 
 .gift-picked-product {
-  margin: 6px 0 2px;
+  margin: var(--space-2) 0 2px;
   font-weight: 700;
   color: var(--forest-800);
-  font-size: 14.5px;
+  font-size: var(--text-md);
 }
 
-/* Product detail modal (desktop) / bottom-sheet (<=480px) — WP-BROWSE.
-   Shared by buyer chat (app.js) and the recipient grid (gift.js). */
+/* ==========================================================================
+   Product detail modal (desktop) / bottom-sheet (<=480px) — WP-BROWSE.
+   Shared by buyer chat (app.js) and the recipient grid (gift.js).
+   ========================================================================== */
 .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(15, 32, 22, 0.55);
+  background: rgba(15, 32, 22, 0.5);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 20px;
-  animation: modal-fade-in 0.18s ease both;
+  padding: var(--space-5);
+  animation: modal-fade-in var(--duration-base) var(--ease) both;
+  transition: opacity var(--duration-base) var(--ease);
+}
+
+.modal-backdrop.closing {
+  opacity: 0;
 }
 
 @keyframes modal-fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 body.modal-open {
@@ -1047,19 +1556,31 @@ body.modal-open {
   overflow-y: auto;
   background: var(--surface);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lift);
-  animation: modal-pop-in 0.22s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  box-shadow: var(--shadow-3);
+  animation: modal-pop-in var(--duration-slow) var(--ease) both;
+  transition: transform var(--duration-base) var(--ease), opacity var(--duration-base) var(--ease);
+}
+
+.modal-backdrop.closing .modal-panel {
+  transform: translateY(10px) scale(0.98);
+  opacity: 0;
 }
 
 @keyframes modal-pop-in {
-  from { opacity: 0; transform: translateY(14px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .modal-close {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: var(--space-2);
+  right: var(--space-2);
   z-index: 2;
   width: 32px;
   height: 32px;
@@ -1067,12 +1588,13 @@ body.modal-open {
   border-radius: 50%;
   background: rgba(15, 32, 22, 0.55);
   color: #fff;
-  font-size: 20px;
+  font-size: var(--text-xl);
   line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background var(--duration-fast) var(--ease);
 }
 
 .modal-close:hover {
@@ -1119,25 +1641,36 @@ body.modal-open {
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.85);
   color: var(--forest-800);
-  font-size: 16px;
+  font-size: var(--text-md);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow-1);
+  transition: background var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
 }
 
-.modal-carousel-arrow-prev { left: 10px; }
-.modal-carousel-arrow-next { right: 10px; }
+.modal-carousel-arrow:hover {
+  background: #fff;
+  transform: translateY(-50%) scale(1.06);
+}
+
+.modal-carousel-arrow-prev {
+  left: var(--space-2);
+}
+
+.modal-carousel-arrow-next {
+  right: var(--space-2);
+}
 
 .modal-carousel-dots {
   position: absolute;
-  bottom: 10px;
+  bottom: var(--space-2);
   left: 0;
   right: 0;
   display: flex;
   justify-content: center;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
 .modal-carousel-dot {
@@ -1145,6 +1678,7 @@ body.modal-open {
   height: 6px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.6);
+  transition: transform var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
 }
 
 .modal-carousel-dot.active {
@@ -1153,25 +1687,25 @@ body.modal-open {
 }
 
 .modal-body {
-  padding: 18px 20px 22px;
+  padding: var(--space-5) var(--space-5) var(--space-6);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .modal-title-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .modal-title {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--text-lg);
   font-weight: 800;
   color: var(--forest-800);
-  line-height: 1.35;
+  line-height: var(--leading-snug);
 }
 
 .modal-merchant {
@@ -1180,33 +1714,48 @@ body.modal-open {
 }
 
 .modal-price {
-  font-size: 19px;
+  font-size: var(--text-xl);
   font-weight: 800;
   color: var(--forest-800);
 }
 
 .modal-headroom {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--text-base);
   font-weight: 600;
   color: var(--gold-700);
 }
 
 .modal-loading,
 .modal-error {
-  margin: 4px 0 0;
-  font-size: 13.5px;
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-base);
   color: var(--text-muted);
 }
 
+.modal-skeleton-lines {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.modal-skeleton-lines .skeleton-line {
+  height: 10px;
+  border-radius: var(--radius-full);
+  background: var(--neutral-200);
+  position: relative;
+  overflow: hidden;
+}
+
 .modal-description-wrap {
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .modal-description {
   margin: 0;
-  font-size: 13.5px;
-  line-height: 1.55;
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
   color: var(--text-muted);
   white-space: pre-line;
 }
@@ -1219,33 +1768,38 @@ body.modal-open {
 }
 
 .modal-more-btn {
-  margin-top: 4px;
+  margin-top: var(--space-1);
   border: none;
   background: none;
   padding: 0;
   color: var(--forest-700);
   font-weight: 700;
-  font-size: 12.5px;
+  font-size: var(--text-sm);
   cursor: pointer;
+}
+
+.modal-more-btn:hover {
+  text-decoration: underline;
 }
 
 .modal-variants {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 4px;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
 }
 
 .variant-chip {
   border: 1px solid var(--border);
   background: var(--cream-100);
   color: var(--forest-800);
-  font-size: 12.5px;
+  font: inherit;
+  font-size: var(--text-sm);
   font-weight: 700;
-  padding: 7px 13px;
-  border-radius: 999px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
 }
 
 .variant-chip:hover:not(:disabled) {
@@ -1265,7 +1819,7 @@ body.modal-open {
 }
 
 .modal-cta {
-  margin-top: 10px;
+  margin-top: var(--space-3);
   width: 100%;
   justify-content: center;
 }
@@ -1280,7 +1834,11 @@ body.modal-open {
     max-width: none;
     max-height: 92vh;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-    animation: sheet-slide-up 0.24s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+    animation: sheet-slide-up var(--duration-slow) var(--ease) both;
+  }
+
+  .modal-backdrop.closing .modal-panel {
+    transform: translateY(100%);
   }
 
   .modal-carousel-frame {
@@ -1289,35 +1847,47 @@ body.modal-open {
 }
 
 @keyframes sheet-slide-up {
-  from { transform: translateY(100%); }
-  to { transform: translateY(0); }
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
 }
 
-/* Mobile */
+/* ==========================================================================
+   Mobile
+   ========================================================================== */
 @media (max-width: 480px) {
   .app-header {
-    padding: 12px 14px;
+    padding: var(--space-3) var(--space-4);
   }
 
   .app-header-titles h1 {
-    font-size: 16px;
+    font-size: var(--text-lg);
   }
 
   .subtitle {
-    font-size: 11.5px;
+    font-size: var(--text-xs);
   }
 
   .budget-chip {
-    font-size: 11px;
-    padding: 6px 10px;
+    font-size: var(--text-xs);
+    padding: 6px var(--space-3);
+  }
+
+  /* "cap · enforced by Prava" is too verbose for a mobile chip and pushes the
+     brand block into a cramped two-line wrap — keep just the amount + "cap". */
+  .budget-chip-detail {
+    display: none;
   }
 
   .chat-log {
-    padding: 14px;
+    padding: var(--space-4);
   }
 
   .chat-input-row {
-    padding: 10px 12px;
+    padding: var(--space-3);
   }
 
   .msg-group {
@@ -1325,7 +1895,7 @@ body.modal-open {
   }
 
   .product-card {
-    width: 160px;
+    width: 158px;
   }
 
   #send-btn span {
@@ -1333,24 +1903,38 @@ body.modal-open {
   }
 
   #send-btn {
-    padding: 12px 14px;
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .gift-controls {
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
+    gap: var(--space-2);
   }
 }
 
+/* ==========================================================================
+   Reduced motion — full compliance. Everything that animates gets a static
+   fallback rather than just "animation: none", so nothing is left mid-transform.
+   ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
-  .msg-row,
-  .product-card,
-  .receipt-card,
-  .budget-chip,
-  .welcome-card,
-  .typing-indicator,
-  .modal-backdrop,
-  .modal-panel {
-    animation: none !important;
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 
-  .product-card {
+  .product-card,
+  .gift-hero,
+  .budget-chip {
     opacity: 1;
+    transform: none;
+  }
+
+  .product-card:hover .product-card-image {
     transform: none;
   }
 }
