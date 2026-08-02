@@ -63,6 +63,7 @@ __all__ = [
     "classify_outcome",
     "extract_order_id",
     "detect_decline",
+    "strip_simulation_copy",
     "mask_pan",
     "shipping_address",
     "shipping_profile",
@@ -304,6 +305,13 @@ DECLINE_MARKERS = (
     "payment could not be processed",
     "unable to process your payment",
     "we couldn't process your payment",
+    # Shopify's live decline banner, verified against the dev store:
+    # "There was an issue processing your payment. Try again or use a
+    # different payment method." (plus its near-identical variants).
+    "issue processing your payment",
+    "problem processing your payment",
+    "error processing your payment",
+    "trouble processing your payment",
     "transaction was not authorized",
     "transaction not authorized",
     "insufficient funds",
@@ -397,9 +405,30 @@ def extract_order_id(body_text: str = "", url: str = "") -> Optional[str]:
     return None
 
 
+# Test gateways advertise their own semantics on the payment form -- Shopify's
+# Bogus Gateway renders "2 to simulate a declined transaction" from the moment
+# the card fields appear, long before any gateway verdict exists. Matching that
+# copy made every in-flight poll classify as DECLINED, so simulation clauses are
+# removed before decline markers are searched for.
+_SIMULATION_CLAUSE = re.compile(r"[^.\n]*\bsimulat\w*\b[^.\n]*", re.I)
+
+
+def strip_simulation_copy(text: str) -> str:
+    """Drop test-gateway instruction clauses from *text*."""
+    return _SIMULATION_CLAUSE.sub(" ", text or "")
+
+
+def normalize_page_text(text: str) -> str:
+    """Lowercase and fold typographic apostrophes so markers match real copy.
+
+    Shopify writes "couldn't" with U+2019; our markers use the ASCII quote.
+    """
+    return (text or "").replace("’", "'").replace("‘", "'").lower()
+
+
 def detect_decline(body_text: str) -> Optional[str]:
     """Return the decline phrase found in the page text, if any."""
-    text = (body_text or "").lower()
+    text = normalize_page_text(strip_simulation_copy(body_text))
     for marker in DECLINE_MARKERS:
         if marker in text:
             return marker
@@ -1489,7 +1518,10 @@ def run_shopify_checkout(
 
         _submit_payment(page, steps)
         result = _await_outcome(page, max(deadline, time.time() + 45), details)
-        _screenshot(page, result.status.lower(), details)
+        # _await_outcome has already copied `details` into result.details, so the
+        # outcome screenshot must be recorded on result.details -- writing it to
+        # `details` here would leave it out of the returned result entirely.
+        _screenshot(page, result.status.lower(), result.details)
         return result
     except CheckoutError:
         _screenshot(page, "error", details)

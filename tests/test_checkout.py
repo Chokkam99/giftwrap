@@ -110,6 +110,12 @@ def test_extract_order_id_text_wins_over_url():
         ("Insufficient funds on this card", "insufficient funds"),
         ("The transaction was not authorized", "transaction was not authorized"),
         ("This purchase exceeds the limit on your card", "exceeds the limit"),
+        # Verbatim Shopify decline banner from the dev-store rehearsal.
+        (
+            "There was an issue processing your payment. Try again or use a "
+            "different payment method.",
+            "issue processing your payment",
+        ),
     ],
 )
 def test_detect_decline_finds_marker(text, marker):
@@ -122,6 +128,43 @@ def test_detect_decline_finds_marker(text, marker):
 )
 def test_detect_decline_negative(text):
     assert detect_decline(text) is None
+
+
+# The Bogus Gateway prints this block on the payment form itself, before the
+# card is ever submitted -- reading it as a verdict declared every in-flight
+# poll a decline.
+BOGUS_GATEWAY_INSTRUCTIONS = (
+    "Testing instruction\n"
+    "Use these values to test your checkout:\n"
+    "1 to simulate an approved transaction\n"
+    "2 to simulate a declined transaction\n"
+    "3 to simulate a gateway failure\n"
+    "Use any future expiration date and any 3-digit security code."
+)
+
+
+def test_detect_decline_ignores_test_gateway_instructions():
+    assert detect_decline(BOGUS_GATEWAY_INSTRUCTIONS) is None
+
+
+def test_detect_decline_still_fires_alongside_gateway_instructions():
+    text = BOGUS_GATEWAY_INSTRUCTIONS + "\nYour card was declined."
+    assert detect_decline(text) == "declined"
+
+
+def test_detect_decline_folds_typographic_apostrophes():
+    assert detect_decline("We couldn’t process your payment.") == (
+        "we couldn't process your payment"
+    )
+
+
+def test_classify_outcome_keeps_polling_while_payment_form_is_shown():
+    """A payment page still showing test-gateway copy is not a decline."""
+    result = classify_outcome(
+        "https://gifting-demo.myshopify.com/checkouts/c/tok",
+        "Payment\nCredit card\n" + BOGUS_GATEWAY_INSTRUCTIONS,
+    )
+    assert result.status == STATUS_FAILED
 
 
 # --------------------------------------------------------------------------
@@ -567,6 +610,28 @@ def test_non_dry_run_does_submit_payment(monkeypatch):
     )
     assert "PAID" in calls
     assert result.status == STATUS_APPROVED
+
+
+def test_outcome_screenshot_lands_on_the_returned_result(monkeypatch):
+    """The post-payment shot must be recorded on the result, not a stale dict."""
+    calls = []
+    mod = _stub_browser_flow(monkeypatch, calls)
+    monkeypatch.setattr(
+        mod,
+        "_screenshot",
+        lambda page, label, details: details.setdefault("screenshots", []).append(
+            f"/tmp/checkout-{label}.png"
+        ),
+    )
+    result = mod.run_shopify_checkout(
+        token="4111111111111111",
+        dynamic_cvv="123",
+        expiry_month=12,
+        expiry_year=2029,
+        product_url=DEV_PRODUCT_URL,
+        dry_run=False,
+    )
+    assert result.details.get("screenshots") == ["/tmp/checkout-approved.png"]
 
 
 # --------------------------------------------------------------------------
