@@ -69,7 +69,11 @@ MAX_SHOWN_PRODUCTS = 36
 CURRENCY = os.getenv("GIFT_CURRENCY", "INR")
 CARD_POLL_TIMEOUT = 10  # seconds — short so the model can poll conversationally
 BUYER_ID = os.getenv("PRAVA_USER_ID", "agentic-gifting-buyer")
-BUYER_EMAIL = os.getenv("PRAVA_USER_EMAIL", "buyer@example.com")
+# Forwarded to the card network during passkey registration. MUST be on a real
+# delegated TLD -- a reserved/fake TLD (.local/.test/.demo/.invalid/...) passes
+# every step and then fails at the very last one (PASSKEY_REG_FAILED).
+# example.com is fine: .com is a real TLD.
+BUYER_EMAIL = os.getenv("PRAVA_USER_EMAIL", "gifting-demo@example.com")
 # Prava's create_session requires a merchant country; our demo merchants are Indian.
 MERCHANT_COUNTRY = os.getenv("PRAVA_MERCHANT_COUNTRY", "IN")
 
@@ -260,9 +264,27 @@ def _set_mode(name: str, mode: str, detail: str | None = None) -> None:
     MODULE_STATUS[name]["detail"] = detail
 
 
+def _exc_detail(exc: BaseException) -> str:
+    """Full provider error detail — never collapse a PravaError to its message.
+
+    PravaError carries `code` and `http_status` that the message alone drops;
+    those are exactly what makes a sandbox failure diagnosable.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    extras = [
+        f"{label}={value}"
+        for label, value in (
+            ("code", getattr(exc, "code", None)),
+            ("http_status", getattr(exc, "http_status", None)),
+        )
+        if value
+    ]
+    return f"{detail} ({', '.join(extras)})" if extras else detail
+
+
 def _mark_degraded(name: str, call: str, exc: BaseException) -> str:
     """Record — LOUDLY — that a real module failed at call time."""
-    reason = f"{call}: {type(exc).__name__}: {exc}"
+    reason = f"{call}: {_exc_detail(exc)}"
     MODULE_STATUS[name]["degraded"] = True
     MODULE_STATUS[name]["last_error"] = reason
     log.exception(
@@ -375,6 +397,45 @@ def _parse_amount(value: Any) -> float | None:
         return float(match.group(0).replace(",", ""))
     except ValueError:
         return None
+
+
+def _prava_failure_reason(result: Any) -> str:
+    """Human-readable reason for a terminal `failed` Prava payment result.
+
+    Pulls the per-transaction `error` detail through instead of collapsing
+    every failure into one generic string.
+    """
+    details = [
+        str(err) for txn in (getattr(result, "transactions", None) or [])
+        if (err := getattr(txn, "error", None))
+    ]
+    suffix = f" Prava reported: {'; '.join(details)}" if details else ""
+    return (
+        "The Prava payment session failed and cannot be reused." + suffix +
+        " Do NOT retry this transaction — explain the failure to the buyer and stop."
+    )
+
+
+def _normalize_merchant_url(url: str) -> str:
+    """Bare-https-origin guard for `merchant_details.url` (see prava.client).
+
+    Delegates to the canonical validator so the rule lives in one place; the
+    inline fallback only runs if prava.client is not importable (stub mode),
+    and is deliberately the same shape: https + real host + strip path.
+    """
+    mod = _import("prava.client")
+    fn = getattr(mod, "normalize_merchant_url", None) if mod is not None else None
+    if fn is not None:
+        return fn(url)
+
+    parsed = urlparse((url or "").strip())
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme.lower() != "https" or "." not in hostname:
+        raise ValueError(
+            f"Invalid merchant_url {url!r}: need a bare https origin on a real domain, "
+            f"e.g. https://example.com."
+        )
+    return f"https://{hostname}" + (f":{parsed.port}" if parsed.port else "")
 
 
 def _same_merchant(a: str | None, b: str | None) -> bool:
@@ -791,9 +852,31 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
         }
 
     merchant_name = args.get("merchant_name") or ""
-    merchant_url = args.get("merchant_url") or ""
+    raw_merchant_url = args.get("merchant_url") or ""
     description = args.get("description") or "Gift"
     amount_str = f"{amount:.2f}"
+
+    # MERCHANT URL GUARD — the model supplies merchant_url, so it routinely
+    # hands us a full product URL (…/products/x) or a bare hostname. Prava
+    # requires a bare https origin on a real, delegated TLD; anything else
+    # fails deep inside checkout. Normalize here so the tool result the model
+    # sees is recoverable, and so the same value is what we scope the card to.
+    try:
+        merchant_url = _normalize_merchant_url(raw_merchant_url)
+    except Exception as exc:
+        log.warning("mint blocked: bad merchant_url %r — %s", raw_merchant_url, exc)
+        return {
+            "error": "invalid_merchant_url",
+            "message": (
+                f"Refused: {exc} Re-call mint_scoped_card with merchant_url set to the store's "
+                f"bare https origin (scheme + host only, no path), e.g. https://giva.co — take "
+                f"it from the product's own store domain."
+            ),
+            "error_detail": _exc_detail(exc),
+            "supplied_merchant_url": raw_merchant_url,
+        }
+    if merchant_url != raw_merchant_url:
+        log.info("normalized merchant_url %r -> %r", raw_merchant_url, merchant_url)
 
     session: dict[str, Any] | None = None
     stub = False
@@ -839,6 +922,7 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
         "amount": amount, "iframe_url": session["iframe_url"],
         "expires_at": session["expires_at"], "credential": None,
         "txn_ref_id": None, "polls": 0, "stub": stub, "completed": False,
+        "failed": False, "failed_reason": None,
     }
     log.info("minted scoped card session=%s amount=%.2f stub=%s",
              session["session_id"], amount, stub)
@@ -866,6 +950,16 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
     if record["credential"]:
         return {"status": "approved", "ready": True, "txn_ref_id": record["txn_ref_id"]}
 
+    if record.get("failed"):
+        return {
+            "status": "failed", "ready": False, "terminal": True,
+            "error": "payment_failed",
+            "message": record.get("failed_reason") or (
+                "This Prava transaction failed. Do NOT retry it — tell the buyer what "
+                "happened and stop."
+            ),
+        }
+
     record["polls"] += 1
     credential: dict | None = None
     degraded: str | None = None
@@ -889,6 +983,18 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
                         raw,
                         ("token", "dynamic_cvv", "expiry_month", "expiry_year", "txn_ref_id"),
                     )
+                elif getattr(result, "status", None) == "failed":
+                    # Terminal failure. NEVER auto-retry a failed Prava
+                    # transaction — latch it so further polls short-circuit
+                    # instead of looking like "still pending".
+                    reason = _prava_failure_reason(result)
+                    record["failed"] = True
+                    record["failed_reason"] = reason
+                    log.warning("prava session=%s terminal failure: %s", session_id, reason)
+                    return {
+                        "status": "failed", "ready": False, "terminal": True,
+                        "error": "payment_failed", "message": reason,
+                    }
         except Exception as exc:
             degraded = _mark_degraded("prava", "wait_for_result", exc)
     elif record["stub"] and record["polls"] >= 2:

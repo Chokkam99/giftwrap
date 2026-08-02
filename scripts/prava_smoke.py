@@ -53,7 +53,10 @@ def build_payload() -> dict:
     """Build a representative request payload for POST /v1/sessions."""
     return {
         "user_id": "smoke-test-user",
-        "user_email": "smoke-test@example.com",
+        # Real, delegated TLD on purpose: Prava forwards this to the card
+        # network during passkey registration, and a reserved/fake TLD
+        # (.local/.test/.demo/.invalid/...) fails only at the very last step.
+        "user_email": "gifting-demo@example.com",
         "total_amount": "2999.00",
         "currency": "INR",
         "integration_type": "full_checkout",

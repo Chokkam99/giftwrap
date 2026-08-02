@@ -15,20 +15,150 @@ to the last 4 characters when displaying credentials.
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
 
+log = logging.getLogger(__name__)
+
 DEFAULT_BACKEND_URL = "https://sandbox.api.prava.space"
 
 VALID_REPORT_STATUSES = {"APPROVED", "DECLINED"}
 
 TERMINAL_SESSION_STATUSES = {"completed", "failed"}
+
+# Reserved / special-use / non-delegated TLDs. Prava forwards both the
+# customer email and merchant_details.url to the card network; anything on a
+# TLD that does not resolve in the public DNS root passes every earlier step
+# and then dies at passkey registration (PASSKEY_REG_FAILED). Reject early.
+RESERVED_TLDS = frozenset(
+    {
+        "local", "test", "example", "demo", "invalid", "localhost", "internal",
+        "devices", "lan", "home", "corp", "domain", "host", "intranet", "private",
+        "onion", "alt", "nep", "dev-local", "box", "site-local",
+    }
+)
+
+
+def _tld_of(hostname: str) -> str:
+    return hostname.rsplit(".", 1)[-1].lower() if "." in hostname else hostname.lower()
+
+
+def _tld_is_plausible(tld: str) -> bool:
+    """True when `tld` looks like a real delegated public-DNS TLD.
+
+    We cannot ship the full IANA root zone, so this is a shape check plus the
+    explicit reserved-TLD denylist: alphabetic (or an IDN a-label), >= 2 chars,
+    and not special-use.
+    """
+    if tld in RESERVED_TLDS:
+        return False
+    if tld.startswith("xn--"):
+        return True
+    return len(tld) >= 2 and tld.isalpha()
+
+
+def validate_user_email(email: str) -> str:
+    """Return `email` if it is safe to forward to the card network.
+
+    Raises PravaError when the address is malformed or sits on a reserved /
+    made-up TLD. `foo@example.com` is fine (.com is a real TLD);
+    `foo@something.example` is not.
+    """
+    value = (email or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+", value):
+        raise PravaError(
+            f"Invalid user_email {email!r}: must be a single address of the form name@domain.",
+            code="INVALID_USER_EMAIL",
+        )
+    domain = value.rsplit("@", 1)[1].rstrip(".").lower()
+    if "." not in domain:
+        raise PravaError(
+            f"Invalid user_email {email!r}: domain {domain!r} has no TLD. Prava forwards this "
+            f"address to the card network during passkey registration; use a real domain "
+            f"such as gifting-demo@example.com.",
+            code="INVALID_USER_EMAIL",
+        )
+    tld = _tld_of(domain)
+    if not _tld_is_plausible(tld):
+        raise PravaError(
+            f"Invalid user_email {email!r}: '.{tld}' is a reserved or non-delegated TLD. "
+            f"Passkey registration will fail at the very last step (PASSKEY_REG_FAILED). "
+            f"Use a real TLD, e.g. gifting-demo@example.com.",
+            code="INVALID_USER_EMAIL",
+        )
+    return value
+
+
+def normalize_merchant_url(url: str) -> str:
+    """Return a bare `https://host` origin for `merchant_details.url`.
+
+    Prava requires a bare https origin on a real TLD -- no path, no query, no
+    fragment. A path is STRIPPED (and logged) rather than rejected, because the
+    model routinely supplies a full product URL and losing the whole checkout
+    over it is worse than normalizing. Everything else -- missing/`http`/other
+    scheme, no host, reserved or made-up TLD -- raises PravaError.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        raise PravaError(
+            "merchant_url is required and must be a bare https origin, e.g. https://example.com",
+            code="INVALID_MERCHANT_URL",
+        )
+
+    parsed = urlparse(raw)
+    if not parsed.scheme:
+        raise PravaError(
+            f"Invalid merchant_url {raw!r}: missing scheme. Supply a bare https origin, "
+            f"e.g. https://example.com (not 'example.com').",
+            code="INVALID_MERCHANT_URL",
+        )
+    if parsed.scheme.lower() != "https":
+        raise PravaError(
+            f"Invalid merchant_url {raw!r}: scheme must be https, got {parsed.scheme!r}.",
+            code="INVALID_MERCHANT_URL",
+        )
+
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not hostname:
+        raise PravaError(
+            f"Invalid merchant_url {raw!r}: no host. Supply a bare https origin, "
+            f"e.g. https://example.com",
+            code="INVALID_MERCHANT_URL",
+        )
+    if "." not in hostname:
+        raise PravaError(
+            f"Invalid merchant_url {raw!r}: host {hostname!r} has no TLD. Prava rejects "
+            f"non-public hosts; supply a real storefront origin.",
+            code="INVALID_MERCHANT_URL",
+        )
+    tld = _tld_of(hostname)
+    if not _tld_is_plausible(tld):
+        raise PravaError(
+            f"Invalid merchant_url {raw!r}: '.{tld}' is a reserved or non-delegated TLD. "
+            f"Prava requires a merchant origin on a real public TLD.",
+            code="INVALID_MERCHANT_URL",
+        )
+
+    origin = f"https://{hostname}"
+    if parsed.port:
+        origin = f"{origin}:{parsed.port}"
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        log.warning(
+            "merchant_url %r carried a path/query/fragment; normalized to bare origin %r "
+            "(Prava rejects non-origin merchant URLs)",
+            raw,
+            origin,
+        )
+    return origin
 
 
 def mask_secret(value: Optional[str]) -> Optional[str]:
@@ -206,12 +336,14 @@ class PravaClient:
             raise PravaError("PRAVA_SECRET_KEY is not set (env or constructor arg required)")
 
         self._owns_client = client is None
+        # NOTE: Content-Type is deliberately NOT a client-wide default header.
+        # httpx sets it per-request whenever `json=` is passed, so bodyless
+        # requests (the payment-result GET) never advertise a JSON body they
+        # do not have -- the sandbox rejects that pairing
+        # (FST_ERR_CTP_EMPTY_JSON_BODY).
         self._client = client or httpx.Client(
             base_url=self.backend_url,
-            headers={
-                "Authorization": f"Bearer {self.secret_key}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {self.secret_key}"},
             timeout=timeout,
         )
 
@@ -265,7 +397,14 @@ class PravaClient:
 
         `product_details` is a list of dicts each shaped like
         `{"description": str, "unit_price": str, "quantity": int}`.
+
+        `user_email` and `merchant_url` are validated before any network call:
+        both are forwarded to the card network, and a reserved/fake TLD or a
+        non-origin merchant URL fails only at the very last step of checkout.
+        `merchant_url` is normalized down to its bare https origin.
         """
+        user_email = validate_user_email(user_email)
+        merchant_url = normalize_merchant_url(merchant_url)
         payload: dict[str, Any] = {
             "user_id": user_id,
             "user_email": user_email,
