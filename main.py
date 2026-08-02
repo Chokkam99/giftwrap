@@ -1,20 +1,24 @@
-"""Agentic Gifting — FastAPI backend + Claude tool-use loop (WP4).
+"""Agentic Gifting — FastAPI backend + Claude tool-use loop (WP4 + WP-INT).
 
-Runs standalone today: `prava/`, `ucp/` and `checkout/` are imported lazily
-inside the tool handlers and fall back to clearly-marked stubs when they are
-not importable yet, so integration is automatic once WP1-WP3 land.
+`prava/`, `ucp/` and `checkout/` are imported lazily inside the tool handlers
+and called through their REAL signatures (see WP-INT). Stubs still exist so the
+UI can be demoed without credentials, but falling back to one is now LOUD:
+every stubbed or failed call is logged with its traceback, marked `degraded`
+in the tool result the model sees, and reported by `GET /health`.
 
 Safety invariants enforced here (not just in the prompt):
   * the one-time card `token` / `dynamic_cvv` never reach the model or the logs
     - they live in server-side conversation state, addressed only by session_id;
   * `mint_scoped_card` refuses to mint above the buyer's stated budget, and
-    `complete_checkout` re-checks price and merchant scope before paying.
+    `complete_checkout` re-checks price and merchant scope before paying;
+  * `search_products` hard-filters the catalog by budget in code — UCP's
+    `catalog.filters.price_range.max` is only a soft relevance hint on live
+    stores (WP2 handoff), so over-budget products must never reach the model.
 """
 
 from __future__ import annotations
 
 import importlib
-import inspect
 import json
 import logging
 import os
@@ -44,6 +48,8 @@ CURRENCY = os.getenv("GIFT_CURRENCY", "INR")
 CARD_POLL_TIMEOUT = 10  # seconds — short so the model can poll conversationally
 BUYER_ID = os.getenv("PRAVA_USER_ID", "agentic-gifting-buyer")
 BUYER_EMAIL = os.getenv("PRAVA_USER_EMAIL", "buyer@example.com")
+# Prava's create_session requires a merchant country; our demo merchants are Indian.
+MERCHANT_COUNTRY = os.getenv("PRAVA_MERCHANT_COUNTRY", "IN")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -70,9 +76,24 @@ Follow this flow:
    ready, call `complete_checkout` for the approved product and present the receipt (order id,
    amount, merchant) in plain language.
 
+The buyer's UI sends two LITERAL messages that are button presses, not free-form chat. Recognise
+them exactly:
+  * "I approve: {{title}} (id {{id}}) at {{price}}" — the buyer pressed "Gift this" on that exact
+    product card. This IS the explicit approval required by step 3. Do not search again and do not
+    ask them to confirm a second time: call `mint_scoped_card` ONCE for that product, with
+    `amount` set to that exact price and `merchant_url` set to that product's store URL, then tell
+    them to approve in the Prava window that just opened.
+  * "I completed the Prava approval" — the buyer says they finished the Prava window. Call
+    `get_card_status` with the `session_id` you got back from `mint_scoped_card`. If it comes back
+    pending, say so warmly and ask them to finish the Prava window (they can tell you again). Once
+    `ready` is true, call `complete_checkout` with that `session_id` and the approved product's
+    `product_url`, then present the receipt.
+
 Rules: be warm and brief. Quote prices with the currency. Never invent products, order ids, or
 prices — only report what the tools returned. If a tool refuses (e.g. the budget guard), explain
-the refusal honestly to the buyer instead of retrying with different numbers.
+the refusal honestly to the buyer instead of retrying with different numbers. If a tool result
+carries "degraded": true or "stub": true, the live service was unreachable and the data is fake —
+say so plainly rather than presenting it as real.
 You never see the card number; that is by design."""
 
 def _field(description: str = "", kind: str = "string") -> dict:
@@ -153,7 +174,36 @@ def get_conversation(conversation_id: str) -> Conversation:
 # ------------------------------------------------------------------ lazy WP modules
 
 
+MODULE_NAMES = ("prava", "ucp", "checkout")
+
 _MODULES: dict[str, Any] = {}
+
+# Import-level and runtime health of the three real work packages.
+#   mode      "real"  — the module imported and its entry point is usable
+#             "stub"  — every call is served by the fakes below
+#             "unknown" — not probed yet
+#   degraded  flips to True the first time a REAL module raises at CALL time.
+#             That is the failure this spine used to swallow silently.
+MODULE_STATUS: dict[str, dict[str, Any]] = {
+    name: {"mode": "unknown", "detail": None, "degraded": False, "last_error": None}
+    for name in MODULE_NAMES
+}
+
+
+def _set_mode(name: str, mode: str, detail: str | None = None) -> None:
+    MODULE_STATUS[name]["mode"] = mode
+    MODULE_STATUS[name]["detail"] = detail
+
+
+def _mark_degraded(name: str, call: str, exc: BaseException) -> str:
+    """Record — LOUDLY — that a real module failed at call time."""
+    reason = f"{call}: {type(exc).__name__}: {exc}"
+    MODULE_STATUS[name]["degraded"] = True
+    MODULE_STATUS[name]["last_error"] = reason
+    log.exception(
+        "DEGRADED: real %s module failed in %s — falling back to stub data", name, call
+    )
+    return reason
 
 
 def _import(name: str) -> Any | None:
@@ -161,55 +211,84 @@ def _import(name: str) -> Any | None:
         try:
             _MODULES[name] = importlib.import_module(name)
         except Exception:  # not built yet, or broken mid-edit — use the stub
+            log.exception("could not import %s — that work package will be stubbed", name)
             _MODULES[name] = None
     return _MODULES[name]
 
 
 def _load_ucp() -> Any | None:
-    """WP2's ucp.client.UCPClient, or None (→ stub)."""
+    """WP2's ucp.client.UCPClient, or None (→ stub).
+
+    Constructed no-arg on purpose: the real constructor is
+    `UCPClient(agent_profile_url=DEFAULT_AGENT_PROFILE, timeout=15.0, client=None)`,
+    i.e. every argument already has a working default.
+    """
     if "ucp_instance" not in _MODULES:
+        instance = None
         mod = _import("ucp.client")
-        try:
-            _MODULES["ucp_instance"] = mod.UCPClient() if mod else None
-        except Exception:
-            _MODULES["ucp_instance"] = None
+        if mod is None:
+            _set_mode("ucp", "stub", "ucp.client is not importable")
+        else:
+            try:
+                instance = mod.UCPClient()
+                _set_mode("ucp", "real")
+            except Exception as exc:
+                log.warning("UCPClient() could not be constructed: %s", exc)
+                _set_mode("ucp", "stub", f"{type(exc).__name__}: {exc}")
+        _MODULES["ucp_instance"] = instance
     return _MODULES["ucp_instance"]
 
 
 def _load_prava() -> Any | None:
-    """WP1's prava.client.PravaClient, or None (→ stub). Never used in tests."""
+    """WP1's prava.client.PravaClient, or None (→ stub).
+
+    Env-driven: the real constructor reads PRAVA_SECRET_KEY / PRAVA_BACKEND_URL
+    and raises PravaError when the key is absent, which is exactly the "not
+    configured → stub, and say so" case. Constructing it performs NO network I/O.
+    """
     if "prava_instance" not in _MODULES:
+        instance = None
         mod = _import("prava.client")
-        try:
-            _MODULES["prava_instance"] = mod.PravaClient() if mod else None
-        except Exception:
-            _MODULES["prava_instance"] = None
+        if mod is None:
+            _set_mode("prava", "stub", "prava.client is not importable")
+        else:
+            try:
+                instance = mod.PravaClient()
+                _set_mode("prava", "real")
+            except Exception as exc:
+                log.warning("PravaClient() could not be constructed: %s", exc)
+                _set_mode("prava", "stub", f"{type(exc).__name__}: {exc}")
+        _MODULES["prava_instance"] = instance
     return _MODULES["prava_instance"]
 
 
 def _load_checkout() -> Any | None:
     """WP3's checkout.playwright_checkout.run_shopify_checkout, or None (→ stub)."""
-    mod = _import("checkout.playwright_checkout")
-    return getattr(mod, "run_shopify_checkout", None) if mod else None
+    if "checkout_fn" not in _MODULES:
+        fn = None
+        mod = _import("checkout.playwright_checkout")
+        if mod is None:
+            _set_mode("checkout", "stub", "checkout.playwright_checkout is not importable")
+        else:
+            fn = getattr(mod, "run_shopify_checkout", None)
+            if fn is None:
+                _set_mode("checkout", "stub", "run_shopify_checkout is missing from the module")
+            else:
+                _set_mode("checkout", "real")
+        _MODULES["checkout_fn"] = fn
+    return _MODULES["checkout_fn"]
 
 
-def _call_flexible(fn: Any, **kwargs: Any) -> Any:
-    """Call `fn` with only the kwargs its signature accepts.
-
-    This is the single adaptation point for WP1/WP2 signature drift: extra
-    keywords are dropped rather than raising TypeError.
-    """
-    try:
-        params = list(inspect.signature(fn).parameters.values())
-    except (TypeError, ValueError):
-        return fn(**kwargs)
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
-        return fn(**kwargs)
-    allowed = {
-        p.name for p in params
-        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
-    }
-    return fn(**{k: v for k, v in kwargs.items() if k in allowed})
+def probe_modules() -> dict[str, str]:
+    """Import-level probe: real modules or stubs? Performs no network I/O."""
+    loaders = (("prava", _load_prava), ("ucp", _load_ucp), ("checkout", _load_checkout))
+    for name, loader in loaders:
+        loaded = loader() is not None
+        if not loaded and MODULE_STATUS[name]["mode"] != "stub":
+            _set_mode(name, "stub", MODULE_STATUS[name]["detail"])
+        elif loaded and MODULE_STATUS[name]["mode"] != "real":
+            _set_mode(name, "real")
+    return {name: MODULE_STATUS[name]["mode"] for name in MODULE_NAMES}
 
 
 def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
@@ -279,6 +358,32 @@ def _tool_set_gift_context(conv: Conversation, args: dict) -> dict:
     }
 
 
+def _within_budget(products: list[dict], max_price: float | None) -> tuple[list[dict], int]:
+    """HARD client-side budget filter.
+
+    UCP's `catalog.filters.price_range.max` is a soft relevance hint — WP2 saw
+    both GIVA and Mamaearth return products above the requested max — so the cap
+    is enforced here, before anything reaches the model. Products whose price we
+    cannot parse are dropped too: an unknown price cannot be proven in budget.
+    """
+    if max_price is None:
+        return products, 0
+    kept: list[dict] = []
+    dropped = 0
+    for product in products:
+        price = _parse_amount(product.get("price"))
+        if price is None or price <= 0 or price > max_price + 1e-9:
+            dropped += 1
+            continue
+        kept.append(product)
+    if dropped:
+        log.info(
+            "budget filter dropped %d of %d catalog results above %.2f %s",
+            dropped, dropped + len(kept), max_price, CURRENCY,
+        )
+    return kept, dropped
+
+
 def _tool_search_products(conv: Conversation, args: dict) -> dict:
     store = args.get("store") or DEFAULT_STORE
     query = args.get("query") or ""
@@ -288,23 +393,55 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
 
     client = _load_ucp()
     products: list[dict] = []
+    degraded: str | None = None
     if client is not None:
         try:
-            raw = _call_flexible(
-                client.search_products, store=store, query=query,
-                max_price=max_price, limit=6,
+            # Real signature: search_products(store, query, max_price=None, limit=10).
+            # Over-fetch, because the server-side price filter is only a hint and
+            # our own hard filter below will discard the strays.
+            raw = client.search_products(
+                store=store, query=query, max_price=max_price, limit=12
             )
             products = [_fields(p, PRODUCT_FIELDS) for p in (raw or [])]
         except Exception as exc:
-            log.warning("ucp.search_products failed (%s); using stub", exc)
-    if not products:
-        products = _stub_products(store, query, max_price)
+            degraded = _mark_degraded("ucp", "search_products", exc)
+
+    products, dropped = _within_budget(products, max_price)
+    products = products[:6]
+
+    result: dict[str, Any] = {"store": store}
+    if client is None or degraded:
+        # Only fake results when the catalog was unusable — an empty result from a
+        # WORKING catalog is real information ("nothing in budget"), not a failure.
+        products = _within_budget(_stub_products(store, query, max_price), max_price)[0]
+        result["stub"] = True
+        result["degraded"] = True
+        result["degraded_reason"] = degraded or (
+            MODULE_STATUS["ucp"]["detail"] or "UCP catalog client is unavailable"
+        )
+        result["warning"] = (
+            "These products are PLACEHOLDERS, not real catalog data — tell the buyer."
+        )
 
     for p in products:
         price = _parse_amount(p.get("price"))
         if price is not None and p.get("product_url"):
             conv.prices[p["product_url"]] = price
-    return {"store": store, "count": len(products), "products": products}
+
+    result["count"] = len(products)
+    result["products"] = products
+    if max_price is not None:
+        result["max_price_enforced"] = max_price
+    if dropped:
+        result["filtered_out_over_budget"] = dropped
+    if not products and not result.get("stub"):
+        result["message"] = (
+            f"The catalog returned nothing at or below {max_price:.2f} {CURRENCY} for "
+            f"{query!r}. Try a different search, or ask the buyer to raise the budget."
+            if max_price is not None
+            else f"The catalog returned no products for {query!r}."
+        )
+    return result
 
 
 def _tool_get_product(conv: Conversation, args: dict) -> dict:
@@ -312,19 +449,35 @@ def _tool_get_product(conv: Conversation, args: dict) -> dict:
     product_id = args.get("product_id") or ""
     client = _load_ucp()
     product: dict | None = None
+    degraded: str | None = None
     if client is not None:
         try:
-            raw = _call_flexible(client.get_product, store=store, product_id=product_id)
+            # Real signature: get_product(store, product_id).
+            raw = client.get_product(store=store, product_id=product_id)
             product = _fields(raw, PRODUCT_FIELDS) if raw else None
         except Exception as exc:
-            log.warning("ucp.get_product failed (%s); using stub", exc)
+            degraded = _mark_degraded("ucp", "get_product", exc)
+    stubbed = product is None
     if not product:
         product = _stub_products(store, product_id or "gift", conv.budget, limit=1)[0]
         product["id"] = product_id or product["id"]
     price = _parse_amount(product.get("price"))
     if price is not None and product.get("product_url"):
         conv.prices[product["product_url"]] = price
-    return {"product": product}
+    result: dict[str, Any] = {"product": product}
+    if stubbed:
+        result["stub"] = True
+        result["degraded"] = True
+        result["degraded_reason"] = degraded or (
+            MODULE_STATUS["ucp"]["detail"] or "UCP catalog client is unavailable"
+        )
+    if conv.budget is not None and price is not None and price > conv.budget + 1e-9:
+        result["over_budget"] = True
+        result["message"] = (
+            f"This product costs {price:.2f} {CURRENCY}, above the approved budget of "
+            f"{conv.budget:.2f} {CURRENCY}. Minting for it will be refused."
+        )
+    return result
 
 
 def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
@@ -354,19 +507,31 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
 
     session: dict[str, Any] | None = None
     stub = False
+    degraded: str | None = None
     client = _load_prava()
     if client is not None:
         try:
-            raw = _call_flexible(
-                client.create_session,
-                user_id=BUYER_ID, user_email=BUYER_EMAIL,
-                total_amount=amount_str, currency=CURRENCY,
-                merchant_name=merchant_name, merchant_url=merchant_url,
+            # Real signature (WP1): create_session(user_id, user_email, total_amount,
+            # currency, merchant_name, merchant_url, country_code_iso2, product_details,
+            # description=None, effective_until_minutes=15, integration_type="full_checkout").
+            # country_code_iso2 and product_details are REQUIRED — omitting them used to
+            # raise TypeError and silently drop the whole flow onto the stub.
+            raw = client.create_session(
+                user_id=BUYER_ID,
+                user_email=BUYER_EMAIL,
+                total_amount=amount_str,
+                currency=CURRENCY,
+                merchant_name=merchant_name,
+                merchant_url=merchant_url,
+                country_code_iso2=MERCHANT_COUNTRY,
+                product_details=[
+                    {"description": description, "unit_price": amount_str, "quantity": 1}
+                ],
                 description=description,
             )
             session = _fields(raw, ("session_id", "iframe_url", "expires_at"))
         except Exception as exc:
-            log.warning("prava.create_session failed (%s); using stub", exc)
+            degraded = _mark_degraded("prava", "create_session", exc)
             session = None
     if not session or not session.get("session_id"):
         stub = True
@@ -393,6 +558,13 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
     result["next_step"] = "Ask the buyer to approve in the Prava window, then poll get_card_status."
     if stub:
         result["stub"] = True
+        result["degraded"] = True
+        result["degraded_reason"] = degraded or (
+            MODULE_STATUS["prava"]["detail"] or "Prava client is unavailable"
+        )
+        result["warning"] = (
+            "SIMULATED payment session — no real Prava card was minted. Tell the buyer."
+        )
     return result
 
 
@@ -406,11 +578,19 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
 
     record["polls"] += 1
     credential: dict | None = None
+    degraded: str | None = None
     client = None if record["stub"] else _load_prava()
     if client is not None:
         try:
-            result = _call_flexible(
-                client.wait_for_result, session_id=session_id, timeout=CARD_POLL_TIMEOUT
+            # Real signature (WP1): wait_for_result(session_id, timeout_seconds=120.0,
+            # poll_interval=3.0). It RETURNS the last PaymentResult on timeout rather
+            # than raising, so an exception here is a genuine failure, not "pending".
+            # `timeout=` used to be dropped by the flexible adapter, which meant each
+            # poll blocked the HTTP request for the full two minutes.
+            result = client.wait_for_result(
+                session_id=session_id,
+                timeout_seconds=CARD_POLL_TIMEOUT,
+                poll_interval=2.0,
             )
             if result is not None:
                 raw = result.first_credential() if hasattr(result, "first_credential") else result
@@ -419,8 +599,8 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
                         raw,
                         ("token", "dynamic_cvv", "expiry_month", "expiry_year", "txn_ref_id"),
                     )
-        except Exception as exc:  # timeout or still pending
-            log.info("prava.wait_for_result pending for session=%s (%s)", session_id, type(exc).__name__)
+        except Exception as exc:
+            degraded = _mark_degraded("prava", "wait_for_result", exc)
     elif record["stub"] and record["polls"] >= 2:
         # Stub: first poll is pending (buyer is approving), then it clears.
         credential = {
@@ -441,6 +621,7 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
         "status": "pending", "ready": False,
         "message": "Buyer has not finished approving yet. Ask them to complete the Prava window.",
         **({"stub": True} if record["stub"] else {}),
+        **({"degraded": True, "degraded_reason": degraded} if degraded else {}),
     }
 
 
@@ -477,33 +658,52 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
     run_checkout = _load_checkout()
     if run_checkout is not None:
         try:
-            raw = _call_flexible(
-                run_checkout,
-                token=credential["token"], dynamic_cvv=credential["dynamic_cvv"],
-                expiry_month=credential["expiry_month"], expiry_year=credential["expiry_year"],
+            # Real signature (WP3): run_shopify_checkout(token, dynamic_cvv, expiry_month,
+            # expiry_year, product_url=None, contact_email=..., headless=None, timeout_ms=...,
+            # address_overrides=None, dry_run=False). Returns a CheckoutResult; payment
+            # declines come back as a result, only setup problems raise CheckoutError.
+            raw = run_checkout(
+                token=credential["token"],
+                dynamic_cvv=credential["dynamic_cvv"],
+                expiry_month=credential["expiry_month"],
+                expiry_year=credential["expiry_year"],
                 product_url=product_url,
             )
             outcome = _fields(raw, ("success", "order_id", "status", "message"))
         except Exception as exc:
-            log.warning("checkout failed for session=%s: %s", session_id, exc)
-            outcome = {"success": False, "order_id": None, "status": "failed",
-                       "message": f"Checkout error: {exc}"}
+            if type(exc).__name__ == "CheckoutError":
+                # A by-design refusal (non dev-store host, missing config) — the
+                # module is healthy, the request was not allowed.
+                log.warning("checkout refused for session=%s: %s", session_id, exc)
+                outcome = {"success": False, "order_id": None, "status": "refused",
+                           "message": str(exc)}
+            else:
+                reason = _mark_degraded("checkout", "run_shopify_checkout", exc)
+                outcome = {"success": False, "order_id": None, "status": "failed",
+                           "message": f"Checkout error: {exc}",
+                           "degraded": True, "degraded_reason": reason}
     else:
         outcome = {"success": True, "order_id": f"STUB-{uuid.uuid4().hex[:6].upper()}",
-                   "status": "paid", "message": "Stubbed checkout (WP3 not present).", "stub": True}
+                   "status": "paid", "message": "Stubbed checkout (WP3 not present).",
+                   "stub": True, "degraded": True,
+                   "degraded_reason": MODULE_STATUS["checkout"]["detail"]
+                                      or "checkout module unavailable",
+                   "warning": "SIMULATED order — nothing was actually purchased."}
 
     # Always report back to Prava, or the txn sticks in awaiting_result.
     client = _load_prava()
     if client is not None and record["txn_ref_id"]:
         try:
-            _call_flexible(
-                client.report_status, session_id=session_id,
+            # Real signature (WP1): report_status(session_id, txn_ref_id, status),
+            # where status is exactly "APPROVED" or "DECLINED".
+            client.report_status(
+                session_id=session_id,
                 txn_ref_id=record["txn_ref_id"],
-                txn_status="APPROVED" if outcome.get("success") else "DECLINED",
                 status="APPROVED" if outcome.get("success") else "DECLINED",
             )
         except Exception as exc:
-            log.error("report_status failed for session=%s: %s", session_id, exc)
+            _mark_degraded("prava", "report_status", exc)
+            outcome["report_status_failed"] = str(exc)
 
     record["completed"] = True
     record["credential"] = None  # burn the one-time credential
@@ -619,7 +819,12 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
         conv.messages.append({"role": "user", "content": tool_results})
 
     reply = "\n\n".join(texts) or "I'm still working on that — could you say that again?"
-    return {"reply": reply, "cards": cards or None, "action": action}
+    return {
+        "reply": reply,
+        "cards": cards or None,
+        "action": action,
+        "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
+    }
 
 
 # ------------------------------------------------------------------------- app
@@ -634,6 +839,8 @@ class ChatResponse(BaseModel):
     reply: str
     cards: list[dict] | None = None
     action: dict | None = None
+    # Optional; WP5's header chip updates from this when present.
+    budget: str | None = None
 
 
 app = FastAPI(title="Agentic Gifting")
@@ -644,7 +851,28 @@ if STATIC_DIR.is_dir():
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    """Prove the spine is not quietly running on stubs.
+
+    `modules` is import-level truth (did the real work package load?), while
+    `degraded` records whether any real module has since blown up at call time.
+    """
+    modules = probe_modules()
+    detail = {}
+    for name in MODULE_NAMES:
+        status = MODULE_STATUS[name]
+        entry = {k: status[k] for k in ("detail", "degraded", "last_error") if status[k]}
+        if entry:
+            detail[name] = entry
+    payload: dict[str, Any] = {
+        "ok": True,
+        "modules": modules,
+        "degraded": any(MODULE_STATUS[n]["degraded"] for n in MODULE_NAMES),
+        "model": MODEL,
+        "anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
+    }
+    if detail:
+        payload["module_detail"] = detail
+    return payload
 
 
 @app.get("/")

@@ -64,15 +64,24 @@ class FakeAnthropic:
         self.messages = FakeMessages(script)
 
 
+def _reset_module_status() -> None:
+    for name in main.MODULE_NAMES:
+        main.MODULE_STATUS[name] = {
+            "mode": "unknown", "detail": None, "degraded": False, "last_error": None
+        }
+
+
 @pytest.fixture(autouse=True)
 def isolate(monkeypatch):
     """Fresh state + stubs only (never the real WP1/WP2/WP3 modules)."""
     main.CONVERSATIONS.clear()
+    _reset_module_status()
     monkeypatch.setattr(main, "_load_ucp", lambda: None)
     monkeypatch.setattr(main, "_load_prava", lambda: None)
     monkeypatch.setattr(main, "_load_checkout", lambda: None)
     yield
     main.CONVERSATIONS.clear()
+    _reset_module_status()
 
 
 @pytest.fixture
@@ -115,7 +124,45 @@ CONTEXT = ToolUse("set_gift_context", {"budget": "₹3,000", "recipient": "my si
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"ok": True}
+    """/health must expose which work packages are real vs stubbed."""
+    body = client.get("/health").json()
+    assert body["ok"] is True
+    # The autouse fixture forces every loader to None, so all three read "stub".
+    assert body["modules"] == {"prava": "stub", "ucp": "stub", "checkout": "stub"}
+    assert body["degraded"] is False
+    assert body["model"] == main.MODEL
+
+
+def test_health_reports_real_modules_when_they_load(client, monkeypatch):
+    monkeypatch.setattr(main, "_load_ucp", lambda: object())
+    monkeypatch.setattr(main, "_load_prava", lambda: object())
+    monkeypatch.setattr(main, "_load_checkout", lambda: (lambda **_: None))
+    body = client.get("/health").json()
+    assert body["modules"] == {"prava": "real", "ucp": "real", "checkout": "real"}
+
+
+def test_health_surfaces_runtime_degradation(client, monkeypatch):
+    """A real module that fails at call time must show up as degraded."""
+    class Boom:
+        def search_products(self, store, query, max_price=None, limit=10):
+            raise RuntimeError("catalog exploded")
+
+    monkeypatch.setattr(main, "_load_ucp", lambda: Boom())
+    fake = script(
+        monkeypatch,
+        Response([CONTEXT]),
+        Response([ToolUse("search_products", {"query": "earrings"}, "t_boom")]),
+        Response([Text("Sorry, the catalog is down.")]),
+    )
+    client.post("/chat", json={"conversation_id": "cdeg", "message": "gift, 3000"})
+
+    payload = tool_results(fake)["t_boom"]["payload"]
+    assert payload["degraded"] is True and payload["stub"] is True
+    assert "catalog exploded" in payload["degraded_reason"]
+
+    body = client.get("/health").json()
+    assert body["degraded"] is True
+    assert "catalog exploded" in body["module_detail"]["ucp"]["last_error"]
 
 
 def test_root_serves_something(client):
