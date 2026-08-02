@@ -1,5 +1,5 @@
 [project]
-name = "agentic-gifting"
+name = "giftwrap"
 version = "0.1.0"
 description = "Agentic Gifting — budget-scoped AI gifting agent powered by Prava + Shopify UCP"
 requires-python = ">=3.11"
