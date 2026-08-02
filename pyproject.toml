@@ -10,6 +10,8 @@ dependencies = [
     "httpx",
     "playwright",
     "python-dotenv",
+    "openai>=2.52.0",
+    "google-genai>=2.16.0",
 ]
 
 [dependency-groups]

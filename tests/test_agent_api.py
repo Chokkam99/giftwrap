@@ -1,6 +1,8 @@
 """WP4 tests: /chat tool loop, budget guard, credential containment.
 
-The Anthropic client is always mocked (no API key needed), and the lazy WP1-WP3
+The Anthropic client is always mocked (no API key needed) — these tests exercise
+the anthropic adapter in `llm/providers/`, so they pin LLM_PROVIDER=anthropic and
+patch that module's client getter regardless of what .env says. The lazy WP1-WP3
 loaders are forced to None so the run is deterministic against the stubs even
 while those modules are landing in parallel. No real Prava or checkout call is
 ever made from here.
@@ -18,6 +20,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import main  # noqa: E402
+from llm.providers import anthropic as anthropic_provider  # noqa: E402
 
 
 # --------------------------------------------------------------- fake Anthropic
@@ -76,6 +79,9 @@ def isolate(monkeypatch):
     """Fresh state + stubs only (never the real WP1/WP2/WP3 modules)."""
     main.CONVERSATIONS.clear()
     _reset_module_status()
+    # The adapter under test is always the anthropic one, whatever .env selects.
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setattr(main, "_llm", None)
     monkeypatch.setattr(main, "_load_ucp", lambda: None)
     monkeypatch.setattr(main, "_load_prava", lambda: None)
     monkeypatch.setattr(main, "_load_checkout", lambda: None)
@@ -91,7 +97,7 @@ def client() -> TestClient:
 
 def script(monkeypatch, *responses: Response) -> FakeAnthropic:
     fake = FakeAnthropic(list(responses))
-    monkeypatch.setattr(main, "get_anthropic_client", lambda: fake)
+    monkeypatch.setattr(anthropic_provider, "get_client", lambda: fake)
     return fake
 
 
@@ -130,7 +136,9 @@ def test_health(client):
     # The autouse fixture forces every loader to None, so all three read "stub".
     assert body["modules"] == {"prava": "stub", "ucp": "stub", "checkout": "stub"}
     assert body["degraded"] is False
-    assert body["model"] == main.MODEL
+    # …and which LLM adapter is answering /chat.
+    assert body["llm"]["provider"] == "anthropic"
+    assert body["model"] == body["llm"]["model"] == main.get_llm().model
 
 
 def test_health_reports_real_modules_when_they_load(client, monkeypatch):
@@ -376,7 +384,7 @@ def test_checkout_requires_approval_first(client, monkeypatch):
 
 def test_missing_api_key_is_a_clean_503(client, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr(main, "_anthropic_client", None)
+    monkeypatch.setattr(anthropic_provider, "_client", None)
     response = client.post("/chat", json={"conversation_id": "c10", "message": "hi"})
     assert response.status_code == 503
     assert "ANTHROPIC_API_KEY" in response.json()["detail"]

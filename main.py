@@ -1,4 +1,7 @@
-"""Agentic Gifting — FastAPI backend + Claude tool-use loop (WP4 + WP-INT).
+"""Agentic Gifting — FastAPI backend + provider-agnostic tool-use loop (WP4 + WP-INT).
+
+The agent brain is swapped with one env var, `LLM_PROVIDER=anthropic|openai|gemini`
+(see `llm/`); this module only speaks the neutral `llm.Msg` / `llm.ToolSpec` shapes.
 
 `prava/`, `ucp/` and `checkout/` are imported lazily inside the tool handlers
 and called through their REAL signatures (see WP-INT). Stubs still exist so the
@@ -39,12 +42,12 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from llm import LLMConfigError, LLMError, Msg, Provider, ToolSpec, get_provider
+
 load_dotenv()
 
 log = logging.getLogger("agentic_gifting")
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
-MAX_TOKENS = 8192
 MAX_TOOL_ITERATIONS = 10
 DEFAULT_STORE = os.getenv("UCP_DEFAULT_STORE", "giva-jewelry.myshopify.com")
 # Multi-store catalog: when a tool call omits `store`, every one of these is searched
@@ -132,13 +135,18 @@ def _field(description: str = "", kind: str = "string") -> dict:
     return {"type": kind, "description": description} if description else {"type": kind}
 
 
-def _tool(name: str, description: str, required: list[str], /, **properties: dict) -> dict:
-    # positional-only, so a tool may itself have a "description" input field
-    return {"name": name, "description": description,
-            "input_schema": {"type": "object", "properties": properties, "required": required}}
+def _tool(name: str, description: str, required: list[str], /, **properties: dict) -> ToolSpec:
+    # positional-only, so a tool may itself have a "description" input field.
+    # `parameters` is plain JSON Schema; each provider translates it to its own
+    # dialect (Gemini strips the keywords it does not support).
+    return ToolSpec(
+        name=name,
+        description=description,
+        parameters={"type": "object", "properties": properties, "required": required},
+    )
 
 
-TOOLS: list[dict[str, Any]] = [
+TOOLS: list[ToolSpec] = [
     _tool("set_gift_context",
           "Record the gift context. MUST be called before any other tool. The budget recorded "
           "here is enforced in code: minting above it is rejected.",
@@ -194,7 +202,9 @@ TOOLS: list[dict[str, Any]] = [
 @dataclass
 class Conversation:
     id: str
-    messages: list[dict[str, Any]] = field(default_factory=list)
+    # Provider-neutral history (llm.Msg); each adapter translates it to its own
+    # wire format, so switching LLM_PROVIDER changes nothing here.
+    messages: list[Msg] = field(default_factory=list)
     budget: float | None = None
     recipient: str | None = None
     note: str | None = None
@@ -1066,40 +1076,34 @@ def dispatch_tool(conv: Conversation, name: str, args: dict) -> dict:
         return {"error": f"{name} failed: {exc}"}
 
 
-# ----------------------------------------------------------------- Claude loop
+# ------------------------------------------------------------------- agent loop
 
 
-_anthropic_client: Any | None = None
+# The active LLM adapter (anthropic | openai | gemini, picked by $LLM_PROVIDER).
+# Built once and cached: the provider object is stateless, and its SDK client is
+# created lazily on the first real call.
+_llm: Provider | None = None
 
 
-def get_anthropic_client() -> Any:
-    global _anthropic_client
-    if _anthropic_client is None:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise HTTPException(
-                status_code=503,
-                detail="ANTHROPIC_API_KEY is not set — add it to .env and restart the server.",
-            )
-        import anthropic
-
-        _anthropic_client = anthropic.Anthropic(api_key=api_key)
-    return _anthropic_client
+def get_llm() -> Provider:
+    global _llm
+    if _llm is None:
+        _llm = get_provider()
+    return _llm
 
 
-def _serialize_block(block: Any) -> dict | None:
-    kind = getattr(block, "type", None)
-    if kind == "text":
-        return {"type": "text", "text": block.text}
-    if kind == "tool_use":
-        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
-    return None  # thinking / unknown blocks are not replayed
+def system_prompt() -> str:
+    """Shared prompt plus the active provider's optional addendum."""
+    return SYSTEM_PROMPT + get_llm().prompt_suffix
 
 
 def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     """Run the tool-use loop for one buyer message. Returns the /chat payload."""
-    client = get_anthropic_client()
-    conv.messages.append({"role": "user", "content": user_message})
+    try:
+        provider = get_llm()
+    except LLMConfigError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    conv.messages.append(Msg(role="user", content=user_message))
 
     texts: list[str] = []
     cards: list[dict] = []
@@ -1107,48 +1111,47 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     has_more = False
 
     for _ in range(MAX_TOOL_ITERATIONS):
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=conv.messages,
-        )
-        blocks = list(response.content or [])
-        assistant_content = [b for b in (_serialize_block(x) for x in blocks) if b]
-        if assistant_content:
-            conv.messages.append({"role": "assistant", "content": assistant_content})
+        try:
+            turn = provider.complete(
+                system=system_prompt(), messages=conv.messages, tools=TOOLS
+            )
+        except LLMConfigError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except LLMError as exc:
+            log.exception("%s provider call failed", provider.name)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        tool_uses = [b for b in blocks if getattr(b, "type", None) == "tool_use"]
-        for block in blocks:
-            if getattr(block, "type", None) == "text" and block.text.strip():
-                texts.append(block.text.strip())
-        if not tool_uses:
+        if turn.text or turn.tool_calls:
+            conv.messages.append(
+                Msg(role="assistant", content=turn.text, tool_calls=turn.tool_calls)
+            )
+        if turn.text and turn.text.strip():
+            texts.append(turn.text.strip())
+        if not turn.tool_calls:
             break
 
-        tool_results = []
-        for block in tool_uses:
-            result = dispatch_tool(conv, block.name, block.input or {})
-            if block.name == "search_products":
+        for call in turn.tool_calls:
+            result = dispatch_tool(conv, call.name, call.arguments or {})
+            if call.name == "search_products":
                 cards = result.get("products", []) or cards
                 has_more = bool(result.get("has_more"))
-            elif block.name == "get_product" and result.get("product"):
+            elif call.name == "get_product" and result.get("product"):
                 cards = [result["product"]]
-            elif block.name == "mint_scoped_card" and result.get("session_id"):
+            elif call.name == "mint_scoped_card" and result.get("session_id"):
                 action = {"type": "approve_payment", "iframe_url": result["iframe_url"],
                           "session_id": result["session_id"]}
-            elif block.name == "complete_checkout" and result.get("success"):
+            elif call.name == "complete_checkout" and result.get("success"):
                 action = {"type": "receipt", "order_id": result.get("order_id"),
                           "amount": result.get("amount"), "merchant": result.get("merchant")}
-            elif block.name == "create_gift_link" and result.get("gift_url"):
+            elif call.name == "create_gift_link" and result.get("gift_url"):
                 action = {"type": "gift_link", "url": result["gift_url"], "token": result["token"]}
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": json.dumps(result, default=str),
-                "is_error": bool(result.get("error")),
-            })
-        conv.messages.append({"role": "user", "content": tool_results})
+            conv.messages.append(Msg(
+                role="tool_result",
+                content=json.dumps(result, default=str),
+                tool_call_id=call.id,
+                tool_name=call.name,
+                is_error=bool(result.get("error")),
+            ))
 
     reply = "\n\n".join(texts) or "I'm still working on that — could you say that again?"
     return {
@@ -1219,11 +1222,23 @@ def health() -> dict:
         entry = {k: status[k] for k in ("detail", "degraded", "last_error") if status[k]}
         if entry:
             detail[name] = entry
+    try:
+        provider = get_llm()
+        llm_info = provider.info()
+    except LLMConfigError as exc:  # unknown LLM_PROVIDER — say so instead of 500ing
+        llm_info = {
+            "provider": (os.getenv("LLM_PROVIDER") or "").strip().lower() or None,
+            "model": None,
+            "key_present": False,
+            "error": str(exc),
+        }
     payload: dict[str, Any] = {
         "ok": True,
         "modules": modules,
         "degraded": any(MODULE_STATUS[n]["degraded"] for n in MODULE_NAMES),
-        "model": MODEL,
+        # Which brain is actually answering /chat right now.
+        "llm": llm_info,
+        "model": llm_info["model"],
         "anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
     }
     if detail:
