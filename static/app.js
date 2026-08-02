@@ -62,7 +62,12 @@
   function placeholderImage() {
     var div = document.createElement('div');
     div.className = 'product-card-image-placeholder';
-    div.textContent = '🎁'; // gift emoji
+    div.innerHTML =
+      '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<rect x="3" y="9" width="18" height="12" rx="1.4"></rect><path d="M3 13h18"></path>' +
+      '<path d="M12 9v12"></path><path d="M12 9C10.3 4.8 6 4.6 6 7.4 6 9 8 9 12 9Z"></path>' +
+      '<path d="M12 9c1.7-4.2 6-4.4 6-1.6C18 9 16 9 12 9Z"></path></svg>';
     return div;
   }
 
@@ -72,9 +77,10 @@
     var row = document.createElement('div');
     row.className = 'card-row';
 
-    cards.forEach(function (card) {
+    cards.forEach(function (card, index) {
       var cardEl = document.createElement('div');
       cardEl.className = 'product-card';
+      cardEl.style.animationDelay = index * 70 + 'ms';
 
       if (card.image_url) {
         var img = document.createElement('img');
@@ -148,10 +154,24 @@
       var panel = document.createElement('div');
       panel.className = 'action-panel';
 
+      var heading = document.createElement('div');
+      heading.className = 'action-panel-heading';
+
+      var icon = document.createElement('div');
+      icon.className = 'action-panel-icon';
+      icon.innerHTML =
+        '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z"></path>' +
+        '<path d="M9 12l2 2 4-4"></path></svg>';
+      heading.appendChild(icon);
+
       var title = document.createElement('div');
       title.className = 'action-panel-title';
       title.textContent = 'Approve with your passkey';
-      panel.appendChild(title);
+      heading.appendChild(title);
+
+      panel.appendChild(heading);
 
       var desc = document.createElement('div');
       desc.className = 'action-panel-desc';
@@ -165,7 +185,12 @@
       var openBtn = document.createElement('button');
       openBtn.className = 'btn btn-primary';
       openBtn.type = 'button';
-      openBtn.textContent = 'Approve with passkey ↗';
+      openBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<circle cx="8" cy="15" r="4"></circle><path d="M10.5 12.5 20 3"></path>' +
+        '<path d="M17 6l2 2"></path><path d="M14 9l2 2"></path></svg>' +
+        '<span>Approve with passkey</span>';
       openBtn.addEventListener('click', function () {
         window.open(action.iframe_url, '_blank', 'noopener,noreferrer');
       });
@@ -174,7 +199,11 @@
       var confirmBtn = document.createElement('button');
       confirmBtn.className = 'btn btn-secondary';
       confirmBtn.type = 'button';
-      confirmBtn.textContent = "I've approved it ✓";
+      confirmBtn.innerHTML =
+        '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M20 6 9 17l-5-5"></path></svg>' +
+        "<span>I've approved it</span>";
       confirmBtn.addEventListener('click', function () {
         sendMessage('I completed the Prava approval');
       });
@@ -192,7 +221,10 @@
 
       var check = document.createElement('div');
       check.className = 'receipt-checkmark';
-      check.textContent = '✓';
+      check.innerHTML =
+        '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" ' +
+        'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M20 6 9 17l-5-5"></path></svg>';
       card.appendChild(check);
 
       var receiptTitle = document.createElement('div');
@@ -200,13 +232,16 @@
       receiptTitle.textContent = 'Order confirmed';
       card.appendChild(receiptTitle);
 
-      card.appendChild(labeledRow('Order ID', action.order_id));
-      card.appendChild(labeledRow('Amount', action.amount));
-      card.appendChild(labeledRow('Merchant', action.merchant));
+      var details = document.createElement('div');
+      details.className = 'receipt-details';
+      details.appendChild(labeledRow('Order ID', action.order_id));
+      details.appendChild(labeledRow('Amount', action.amount));
+      details.appendChild(labeledRow('Merchant', action.merchant));
+      card.appendChild(details);
 
       var footer = document.createElement('div');
       footer.className = 'receipt-footer';
-      footer.textContent = 'Gift is on its way 🎁';
+      footer.textContent = 'Gift is on its way';
       card.appendChild(footer);
 
       group.appendChild(card);
@@ -216,7 +251,9 @@
 
   function updateBudget(budget) {
     if (budget === undefined || budget === null || budget === '') return;
-    budgetAmount.textContent = '₹' + budget;
+    var num = Number(budget);
+    var formatted = isNaN(num) ? budget : num.toLocaleString('en-IN');
+    budgetAmount.textContent = '₹' + formatted;
     budgetChip.hidden = false;
   }
 
@@ -388,17 +425,67 @@
     }
   });
 
-  function init() {
+  var WELCOME_SUGGESTIONS = [
+    "A birthday gift for my mom, ₹3000 budget",
+    "Anniversary gift for my partner",
+    "Something thoughtful for a close friend",
+  ];
+
+  function renderWelcome() {
+    var row = document.createElement('div');
+    row.className = 'msg-row agent';
+
+    var card = document.createElement('div');
+    card.className = 'welcome-card';
+
+    var icon = document.createElement('div');
+    icon.className = 'welcome-icon';
+    icon.innerHTML =
+      '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<rect x="3" y="9" width="18" height="12" rx="1.4"></rect><path d="M3 13h18"></path>' +
+      '<path d="M12 9v12"></path><path d="M12 9C10.3 4.8 6 4.6 6 7.4 6 9 8 9 12 9Z"></path>' +
+      '<path d="M12 9c1.7-4.2 6-4.4 6-1.6C18 9 16 9 12 9Z"></path></svg>';
+    card.appendChild(icon);
+
+    var heading = document.createElement('h2');
+    heading.textContent = "Tell me who you're gifting, and the budget";
+    card.appendChild(heading);
+
+    var body = document.createElement('p');
+    body.textContent =
+      "I'll find real products, you approve the one you like, and Prava mints a one-time " +
+      'card locked to that exact price and merchant — nothing more can ever be charged.';
+    card.appendChild(body);
+
     if (isMock) {
-      addBubble(
-        'agent',
-        "Hi! I'm your gifting agent. Try “gift for mom's birthday” — " +
-          "I'll show products, walk you through Prava approval, and confirm the receipt.\n\n" +
-          '(mock mode is active — no backend calls are made)'
-      );
-    } else {
-      addBubble('agent', "Hi! Tell me who you're shopping for and I'll find the perfect gift.");
+      var note = document.createElement('p');
+      note.className = 'welcome-note';
+      note.textContent = 'Mock mode is active — no backend calls are made.';
+      card.appendChild(note);
     }
+
+    var suggestions = document.createElement('div');
+    suggestions.className = 'welcome-suggestions';
+    WELCOME_SUGGESTIONS.forEach(function (text) {
+      var chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'suggestion-chip';
+      chip.textContent = text;
+      chip.addEventListener('click', function () {
+        sendMessage(text);
+      });
+      suggestions.appendChild(chip);
+    });
+    card.appendChild(suggestions);
+
+    row.appendChild(card);
+    chatLog.appendChild(row);
+    scrollToBottom();
+  }
+
+  function init() {
+    renderWelcome();
     input.focus();
   }
 
