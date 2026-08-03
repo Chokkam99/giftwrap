@@ -479,11 +479,11 @@ def test_bogus_gateway_disabled(env):
 
 
 # --------------------------------------------------------------------------
-# dev-store guard
+# checkout target validation
 # --------------------------------------------------------------------------
 
 
-def test_host_of_and_dev_store_detection():
+def test_host_of_and_dev_store_detection_metadata():
     assert host_of(DEV_PRODUCT_URL) == "gifting-demo.myshopify.com"
     assert is_dev_store_host("gifting-demo.myshopify.com") is True
     assert is_dev_store_host("giva.co") is False
@@ -503,29 +503,17 @@ def test_assert_purchase_allowed_permits_dev_store():
         "https://www.nykaa.com/p/1",
     ],
 )
-def test_assert_purchase_allowed_blocks_real_merchants(url):
-    with pytest.raises(CheckoutError) as exc:
-        assert_purchase_allowed(url, env={})
-    assert "real merchant" in str(exc.value).lower()
+def test_assert_purchase_allowed_permits_merchant_storefronts(url):
+    assert_purchase_allowed(url, env={})
 
 
-def test_real_merchant_block_cannot_be_overridden():
-    with pytest.raises(CheckoutError):
-        assert_purchase_allowed(
-            "https://www.giva.co/products/x", env={"CHECKOUT_ALLOW_ANY_HOST": "1"}
-        )
+def test_assert_purchase_allowed_permits_any_valid_storefront_host():
+    assert_purchase_allowed("https://shop.example.com/products/x", env={})
 
 
-def test_assert_purchase_allowed_blocks_unknown_host_without_override():
-    with pytest.raises(CheckoutError) as exc:
-        assert_purchase_allowed("https://shop.example.com/products/x", env={})
-    assert "myshopify.com" in str(exc.value)
-
-
-def test_assert_purchase_allowed_allows_custom_host_with_override():
-    assert_purchase_allowed(
-        "https://shop.example.com/products/x", env={"CHECKOUT_ALLOW_ANY_HOST": "1"}
-    )
+def test_assert_purchase_allowed_rejects_missing_host():
+    with pytest.raises(CheckoutError, match="Cannot determine host"):
+        assert_purchase_allowed("https:///products/x", env={})
 
 
 # --------------------------------------------------------------------------

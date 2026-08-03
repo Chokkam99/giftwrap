@@ -4,10 +4,10 @@ Prava mints a one-time virtual card (16-digit token + dynamic CVV + expiry).
 There is no pure-API way to spend that card at a Shopify checkout, so this
 module drives the real checkout page in a browser and fills the card in.
 
-Target is ALWAYS a Shopify **development store** we control, running a test
-payment gateway. Purchases against real merchant storefronts are refused by
-``assert_purchase_allowed`` -- catalog/browse against real merchants happens
-elsewhere (UCP), never here.
+The product URL is selected by the buyer through the catalog flow. This module
+validates that it is a usable HTTP(S) storefront URL, then drives that checkout
+in a browser. The actual merchant/gateway determines whether the token is
+accepted.
 
 Public surface:
     run_shopify_checkout(...) -> CheckoutResult    # full purchase
@@ -23,7 +23,6 @@ Environment knobs:
                                    store rejects the Indian default address.
     CHECKOUT_SHIP_*                per-field address overrides (CHECKOUT_SHIP_CITY, ...).
     CHECKOUT_ARTIFACT_DIR          where screenshots are written.
-    CHECKOUT_ALLOW_ANY_HOST        1 to allow a non-myshopify.com dev store.
     BOGUS_GATEWAY                  gateway *simulation*: "1" approves, "2"
                                    fails, "3" errors; any other truthy value
                                    means "1". When set, that single digit is
@@ -80,7 +79,7 @@ class CheckoutError(RuntimeError):
     """Infrastructure/setup problem -- NOT a payment decline.
 
     Raised for missing configuration, a missing browser, a password-gated
-    storefront with no password, or a disallowed (non dev-store) target.
+    storefront with no password, or an invalid checkout target.
     Callers use this to tell "our setup is broken" apart from "the card was
     declined", which comes back as a ``CheckoutResult`` instead.
     """
@@ -137,23 +136,7 @@ ENV_PRODUCT_URL = "SHOPIFY_DEV_STORE_PRODUCT_URL"
 ENV_STOREFRONT_PASSWORD = "SHOPIFY_STOREFRONT_PASSWORD"
 ENV_HEADLESS = "CHECKOUT_HEADLESS"
 ENV_BOGUS_GATEWAY = "BOGUS_GATEWAY"
-ENV_ALLOW_ANY_HOST = "CHECKOUT_ALLOW_ANY_HOST"
 ENV_ARTIFACT_DIR = "CHECKOUT_ARTIFACT_DIR"
-
-# Hosts we must never attempt to buy from. These are live merchants used for
-# read-only catalog browsing elsewhere in the product.
-REAL_MERCHANT_DENYLIST = (
-    "giva.co",
-    "mamaearth.com",
-    "nykaa.com",
-    "myntra.com",
-    "flipkart.com",
-    "ajio.com",
-    "amazon.",
-    "tanishq.co.in",
-    "caratlane.com",
-    "bluestone.com",
-)
 
 TRUTHY = {"1", "true", "yes", "y", "on"}
 FALSY = {"0", "false", "no", "n", "off"}
@@ -204,36 +187,15 @@ def host_of(url: str) -> str:
 
 
 def is_dev_store_host(host: str) -> bool:
-    """Shopify development stores always answer on *.myshopify.com."""
+    """Return whether a host uses Shopify's standard development-store domain."""
     return host.endswith(".myshopify.com")
 
 
 def assert_purchase_allowed(url: str, env: Optional[dict] = None) -> None:
-    """Refuse to spend money anywhere but our own dev store.
-
-    Allowed: ``*.myshopify.com``. A custom dev-store domain can be opted in
-    with ``CHECKOUT_ALLOW_ANY_HOST=1``, but the real-merchant denylist is
-    absolute and cannot be overridden.
-    """
+    """Reject only malformed checkout targets; merchant scope is checked upstream."""
     host = host_of(url)
     if not host:
         raise CheckoutError(f"Cannot determine host for checkout URL: {url!r}")
-    for banned in REAL_MERCHANT_DENYLIST:
-        if banned in host:
-            raise CheckoutError(
-                f"Refusing to run a checkout against real merchant host {host!r}. "
-                "Live merchants are for catalog browsing only; buy on the "
-                "Shopify development store."
-            )
-    if is_dev_store_host(host):
-        return
-    if env_bool(ENV_ALLOW_ANY_HOST, False, env=env):
-        return
-    raise CheckoutError(
-        f"Host {host!r} is not a *.myshopify.com development store. "
-        f"Set {ENV_ALLOW_ANY_HOST}=1 only if this is your own dev store on a "
-        "custom domain."
-    )
 
 
 def mask_pan(pan: Optional[str]) -> str:
