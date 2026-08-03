@@ -269,7 +269,7 @@ def test_structured_card_selection_keeps_id_internal_and_safely_handles_disabled
     }).json()
 
     assert body["action"] is None
-    assert body["reply"] == "Payments are temporarily unavailable. Your selection is saved; please try again in a moment."
+    assert body["reply"] == "We couldn't start the payment approval. Nothing was charged. Please try again."
     rendered = json.dumps(body)
     for forbidden in ("gid://", "PRAVA_ALLOW_REAL", "server-side", "test environment", "card creation"):
         assert forbidden not in rendered

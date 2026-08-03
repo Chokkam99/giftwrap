@@ -1100,8 +1100,8 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
             # This is deliberately safe for the model too: it must not infer or
             # explain server configuration to a buyer from a tool failure.
             "user_message": (
-                "Payments are temporarily unavailable. Your selection is saved; "
-                "please try again in a moment."
+                "We couldn't start the payment approval. Nothing was charged. "
+                "Please try again."
             ),
         }
     if client is not None:
