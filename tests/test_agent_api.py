@@ -199,11 +199,11 @@ def test_chat_roundtrip_plain_reply(client, monkeypatch):
 def test_buyer_reply_sanitizer_keeps_label_but_removes_internal_ids_urls_and_env_flags():
     reply = main._sanitize_buyer_reply(
         "**Great**: [View product](https://shop.example.com/products/gift) "
-        "gid://shopify/Product/123 with PRAVA_ALLOW_REAL enabled."
+        "/gift/secret-token gid://shopify/Product/123 with PRAVA_ALLOW_REAL enabled."
     )
     assert "**Great**" in reply
     assert "View product" in reply
-    for forbidden in ("https://", "gid://", "PRAVA_ALLOW_REAL"):
+    for forbidden in ("https://", "/gift/", "gid://", "PRAVA_ALLOW_REAL"):
         assert forbidden not in reply
 
 
@@ -223,6 +223,31 @@ def test_search_populates_cards(client, monkeypatch):
     assert body["reply"] == "I found a few options within ₹3,000."
     assert "gid://" not in body["reply"] and "[" not in body["reply"]
     assert tool_results(fake)["t_ctx"]["payload"]["budget"] == 3000.0
+
+
+def test_gift_link_reply_hides_raw_link_and_uses_share_below_copy(client, monkeypatch):
+    fake = script(
+        monkeypatch,
+        Response([CONTEXT]),
+        Response([ToolUse("create_gift_link", {"note": "let them pick"}, "t_link")]),
+        Response([Text("Share this link with them: /gift/secret-token")]),
+    )
+
+    body = client.post(
+        "/chat", json={"conversation_id": "c_link", "message": "let them pick the gift"}
+    ).json()
+
+    assert body["action"] == {
+        "type": "gift_link",
+        "url": "/gift/" + body["action"]["token"],
+        "token": body["action"]["token"],
+    }
+    assert body["reply"] == (
+        "Perfect — they can now choose a gift within ₹3,000. "
+        "Share the link below, and come back once they’ve picked something."
+    )
+    assert "/gift/" not in body["reply"]
+    assert "http://" not in body["reply"] and "https://" not in body["reply"]
 
 
 def test_structured_card_selection_keeps_id_internal_and_safely_handles_disabled_payments(

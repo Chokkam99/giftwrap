@@ -1368,7 +1368,7 @@ def _tool_create_gift_link(conv: Conversation, args: dict) -> dict:
         "ok": True,
         "gift_url": f"/gift/{token}",
         "token": token,
-        "message": "Share this link with the recipient so they can pick their own gift.",
+        "message": "Perfect — they can now choose a gift. Share the link below, and come back once they’ve picked something.",
     }
 
 
@@ -1437,6 +1437,7 @@ def _sanitize_buyer_reply(text: str) -> str:
     # Keep a human label if a model emitted a Markdown product link, but never
     # put merchant URLs into a chat bubble (cards and the detail modal own it).
     text = re.sub(r"\[([^\]]+)\]\(https?://[^\s)]+\)", r"\1", text)
+    text = re.sub(r"\b/?gift/[^\s)\]}]+", "", text)
     text = re.sub(r"(?:https?://|www\.)[^\s)\]}]+", "", text)
     text = re.sub(r"gid://[^\s)\]}]+", "", text)
     text = re.sub(r"\b(?:PRAVA|UCP|LLM|ANTHROPIC|OPENAI|GEMINI)_[A-Z0-9_]+\b", "", text)
@@ -1449,6 +1450,15 @@ def _short_search_reply(cards: list[dict], budget: float | None) -> str:
     if budget is None:
         return "I found a few gift options for you."
     return f"I found a few options within {_format_amount(budget, CURRENCY)}."
+
+
+def _gift_link_reply(budget: float | None) -> str:
+    if budget is None:
+        return "Perfect — they can now choose a gift within budget. Share the link below, and come back once they’ve picked something."
+    return (
+        f"Perfect — they can now choose a gift within {_format_amount(budget, CURRENCY)}. "
+        "Share the link below, and come back once they’ve picked something."
+    )
 
 
 def _selection_product(conv: Conversation, selection: "ProductSelection") -> dict[str, Any] | None:
@@ -1580,6 +1590,8 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
         reply = safe_error
     elif search_user_message:
         reply = search_user_message
+    elif action and action.get("type") == "gift_link":
+        reply = _gift_link_reply(conv.budget)
     elif cards:
         # Product cards are the product presentation. Do not duplicate their
         # structured catalog data into a brittle Markdown list from the model.

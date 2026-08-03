@@ -328,20 +328,10 @@
 
       var desc = document.createElement('div');
       desc.className = 'gift-link-desc';
-      desc.textContent = 'Send this to the recipient so they can pick their own gift, within budget.';
+      desc.textContent = 'Share the link below so they can pick their own gift within budget.';
       linkCard.appendChild(desc);
 
-      var row = document.createElement('div');
-      row.className = 'gift-link-row';
-
       var fullUrl = window.location.origin + action.url;
-
-      var urlSpan = document.createElement('span');
-      urlSpan.className = 'gift-link-url';
-      urlSpan.textContent = fullUrl;
-      row.appendChild(urlSpan);
-
-      linkCard.appendChild(row);
 
       // ---- share sheet: WhatsApp / Messages / Copy — one control group ----
       var shareRow = document.createElement('div');
@@ -612,7 +602,7 @@
 
     if (/let them pick|gift link|they can pick|pick their own/.test(lower)) {
       return {
-        reply: "Here's a link you can send them — they'll get to pick anything within budget.",
+        reply: "Perfect — they can now choose a gift within budget. Share the link below, and come back once they’ve picked something.",
         cards: null,
         budget: '3000',
         action: {
