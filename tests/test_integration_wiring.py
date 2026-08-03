@@ -57,8 +57,9 @@ def product(price: str, title: str = "Silver Earrings", pid: str = "gid://p/1"):
     )
 
 
-DEMO_MERCHANT_URL = f"https://{main.DEMO_STORE}"
-DEMO_PRODUCT_URL = f"{DEMO_MERCHANT_URL}/products/selling-plans-ski-wax"
+GIVA_MERCHANT_NAME = "GIVA"
+GIVA_MERCHANT_URL = "https://giva-jewelry.myshopify.com"
+GIVA_PRODUCT_URL = f"{GIVA_MERCHANT_URL}/products/silver-earrings"
 
 
 # ------------------------------------------------------------------ UCP wiring
@@ -194,7 +195,7 @@ def test_empty_but_working_catalog_does_not_fake_products(monkeypatch):
     assert "nothing at or below" in result["message"]
 
 
-def test_search_exposes_a_separate_controlled_checkout_item_without_claiming_ucp(monkeypatch):
+def test_search_returns_only_real_ucp_cards(monkeypatch):
     fake = create_autospec(ucp_client.UCPClient, instance=True)
     fake.search_products_page.return_value = ([], None)
     monkeypatch.setattr(main, "_load_ucp", lambda: fake)
@@ -203,29 +204,8 @@ def test_search_exposes_a_separate_controlled_checkout_item_without_claiming_ucp
         conversation(), {"query": "ski wax", "store": main.DEFAULT_STORE}
     )
 
-    item = result["sandbox_checkout_item"]
     assert result["products"] == []
-    assert item["catalog_source"] == "sandbox_checkout"
-    assert item["product_url"] == main.SANDBOX_CHECKOUT_PRODUCT_URL
-    assert item["merchant"] == main.DEMO_MERCHANT_NAME
-    assert item["id"] not in {p.get("id") for p in result["products"]}
-
-
-def test_sandbox_selection_mints_the_verified_checkout_cap_not_the_catalog_price(monkeypatch):
-    fake = create_autospec(prava_client.PravaClient, instance=True)
-    fake.create_session.return_value = session_obj()
-    monkeypatch.setattr(main, "_load_prava", lambda: fake)
-    conv = conversation(2000.0)
-    item = main._sandbox_checkout_item()
-    assert item is not None
-    conv.products[item["id"]] = item
-
-    response = main.approve_selection_turn(
-        conv, main.ProductSelection(id=item["id"], title=item["title"], price=item["price"])
-    )
-
-    assert response["action"]["type"] == "approve_payment"
-    assert fake.create_session.call_args.kwargs["total_amount"] == item["payment_cap"]
+    assert "sandbox_checkout_item" not in result
 
 
 def test_ucp_failure_is_loud(monkeypatch):
@@ -268,8 +248,8 @@ def session_obj(session_id: str = "sess_live_1"):
 def payment_result(session_id: str, with_credential: bool):
     item = prava_client.LineItem(
         txn_ref_id="txn_ref_9",
-        merchant_name=main.DEMO_MERCHANT_NAME,
-        merchant_url=DEMO_MERCHANT_URL,
+        merchant_name=GIVA_MERCHANT_NAME,
+        merchant_url=GIVA_MERCHANT_URL,
         total_amount="2400.00",
         status="awaiting_result" if with_credential else "pending",
         token="4111111111111111" if with_credential else None,
@@ -299,10 +279,10 @@ def test_mint_calls_create_session_with_every_required_argument(monkeypatch):
 
     conv = conversation()
     result = main._tool_mint_scoped_card(conv, {
-        "merchant_name": main.DEMO_MERCHANT_NAME,
+        "merchant_name": GIVA_MERCHANT_NAME,
         # Models commonly hand the product page here; the client must receive
         # the required bare origin instead.
-        "merchant_url": DEMO_PRODUCT_URL,
+        "merchant_url": GIVA_PRODUCT_URL,
         "amount": "2400.00",
         "description": "Silver earrings",
     })
@@ -310,12 +290,12 @@ def test_mint_calls_create_session_with_every_required_argument(monkeypatch):
     kwargs = fake.create_session.call_args.kwargs
     assert kwargs["total_amount"] == "2400.00"
     assert kwargs["currency"] == main.CURRENCY
-    assert kwargs["country_code_iso2"] == main.DEMO_MERCHANT_COUNTRY
+    assert kwargs["country_code_iso2"] == "IN"
     assert kwargs["product_details"] == [
         {"description": "Silver earrings", "unit_price": "2400.00", "quantity": 1}
     ]
-    assert kwargs["merchant_url"] == DEMO_MERCHANT_URL
-    assert kwargs["merchant_name"] == main.DEMO_MERCHANT_NAME
+    assert kwargs["merchant_url"] == GIVA_MERCHANT_URL
+    assert kwargs["merchant_name"] == GIVA_MERCHANT_NAME
 
     # Real session, so nothing may be flagged as simulated.
     assert result["session_id"] == "sess_live_1"
@@ -323,24 +303,25 @@ def test_mint_calls_create_session_with_every_required_argument(monkeypatch):
     assert conv.minted["sess_live_1"]["stub"] is False
 
 
-def test_known_merchant_country_map_is_exact_and_a_non_demo_mint_never_loads_prava(monkeypatch):
+def test_known_merchant_country_map_is_exact_and_a_salty_mint_uses_india(monkeypatch):
     assert main.merchant_country_for_url("https://salty.co.in/products/gift") == "IN"
     assert main.merchant_country_for_url("https://giva-jewelry.myshopify.com") == "IN"
-    assert main.merchant_country_for_url(DEMO_MERCHANT_URL) == main.DEMO_MERCHANT_COUNTRY
+    assert main.merchant_country_for_url(f"https://{main.DEMO_STORE}") == main.DEMO_MERCHANT_COUNTRY
     assert main.merchant_country_for_url("https://unknown.example") is None
 
-    monkeypatch.setattr(
-        main, "_load_prava", lambda: pytest.fail("browse-only merchants must not load Prava")
-    )
+    fake = create_autospec(prava_client.PravaClient, instance=True)
+    fake.create_session.return_value = session_obj("sess_salty")
+    monkeypatch.setattr(main, "_load_prava", lambda: fake)
     result = main._tool_mint_scoped_card(conversation(), {
         "merchant_name": "Salty", "merchant_url": "https://salty.co.in/products/gift",
         "amount": "1499.00", "description": "Gift box",
     })
 
-    assert result == {
-        "error": "sandbox_checkout_requires_demo_item",
-        "user_message": main._sandbox_payment_boundary_message(),
-    }
+    assert result["session_id"] == "sess_salty"
+    kwargs = fake.create_session.call_args.kwargs
+    assert kwargs["merchant_url"] == "https://salty.co.in"
+    assert kwargs["merchant_name"] == "Salty"
+    assert kwargs["country_code_iso2"] == "IN"
 
 
 def test_mint_budget_guard_runs_before_prava_is_ever_called(monkeypatch):
@@ -367,7 +348,7 @@ def test_card_status_uses_timeout_seconds_not_timeout(monkeypatch):
 
     conv = conversation()
     main._tool_mint_scoped_card(conv, {
-        "merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
+        "merchant_name": GIVA_MERCHANT_NAME, "merchant_url": GIVA_MERCHANT_URL,
         "amount": "2400.00", "description": "Silver earrings",
     })
     pending = main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
@@ -387,7 +368,7 @@ def test_approved_credential_is_captured_but_never_returned(monkeypatch):
 
     conv = conversation()
     main._tool_mint_scoped_card(conv, {
-        "merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
+        "merchant_name": GIVA_MERCHANT_NAME, "merchant_url": GIVA_MERCHANT_URL,
         "amount": "2400.00", "description": "Silver earrings",
     })
     status = main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
@@ -413,10 +394,10 @@ def test_complete_checkout_calls_the_real_checkout_and_reports_status(monkeypatc
     monkeypatch.setattr(main, "_load_checkout", lambda: run_checkout)
 
     conv = conversation()
-    url = DEMO_PRODUCT_URL
+    url = GIVA_PRODUCT_URL
     conv.prices[url] = 2400.0
     main._tool_mint_scoped_card(conv, {
-        "merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
+        "merchant_name": GIVA_MERCHANT_NAME, "merchant_url": GIVA_MERCHANT_URL,
         "amount": "2400.00", "description": "Silver earrings",
     })
     main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
@@ -442,26 +423,30 @@ def test_complete_checkout_calls_the_real_checkout_and_reports_status(monkeypatc
     assert conv.minted["sess_live_1"]["credential"] is None  # one-time card burned
 
 
-def test_checkout_refuses_non_demo_product_before_browser_or_status_report(monkeypatch):
-    """A pre-existing/non-demo record cannot launch checkout or report a spend."""
+def test_checkout_allows_a_scoped_external_product(monkeypatch):
+    """An approved Salty credential reaches checkout when the merchant scope matches."""
     prava = create_autospec(prava_client.PravaClient, instance=True)
     conv = conversation()
     conv.minted["old-session"] = {
         "merchant_name": "Salty", "merchant_url": "https://salty.co.in",
-        "amount": 1499.0, "credential": {"token": "not-used"}, "completed": False,
+        "amount": 1499.0,
+        "credential": {"token": "not-used", "dynamic_cvv": "123", "expiry_month": "12", "expiry_year": "27"},
+        "txn_ref_id": "txn_salty", "completed": False,
     }
-    monkeypatch.setattr(main, "_load_checkout", lambda: pytest.fail("checkout must not launch"))
+    run_checkout = create_autospec(playwright_checkout.run_shopify_checkout)
+    run_checkout.return_value = playwright_checkout.CheckoutResult(
+        success=True, order_id="#salty", status="APPROVED", message="Order placed."
+    )
+    monkeypatch.setattr(main, "_load_checkout", lambda: run_checkout)
     monkeypatch.setattr(main, "_load_prava", lambda: prava)
 
     outcome = main._tool_complete_checkout(conv, {
         "session_id": "old-session", "product_url": "https://salty.co.in/products/gift",
     })
 
-    assert outcome == {
-        "error": "sandbox_checkout_requires_demo_item",
-        "user_message": main._sandbox_payment_boundary_message(),
-    }
-    prava.report_status.assert_not_called()
+    assert outcome["success"] is True
+    assert run_checkout.call_args.kwargs["product_url"] == "https://salty.co.in/products/gift"
+    assert prava.report_status.call_args.kwargs["status"] == "APPROVED"
 
 
 def test_checkout_success_keeps_receipt_when_sandbox_status_reporting_fails(monkeypatch):
@@ -478,14 +463,14 @@ def test_checkout_success_keeps_receipt_when_sandbox_status_reporting_fails(monk
     monkeypatch.setattr(main, "_load_checkout", lambda: run_checkout)
 
     conv = conversation()
-    conv.prices[DEMO_PRODUCT_URL] = 2400.0
+    conv.prices[GIVA_PRODUCT_URL] = 2400.0
     main._tool_mint_scoped_card(conv, {
-        "merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
+        "merchant_name": GIVA_MERCHANT_NAME, "merchant_url": GIVA_MERCHANT_URL,
         "amount": "2400.00", "description": "Demo item",
     })
     main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
     outcome = main._tool_complete_checkout(
-        conv, {"session_id": "sess_live_1", "product_url": DEMO_PRODUCT_URL}
+        conv, {"session_id": "sess_live_1", "product_url": GIVA_PRODUCT_URL}
     )
 
     assert outcome["success"] is True and outcome["order_id"] == "#1043"
