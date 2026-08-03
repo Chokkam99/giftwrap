@@ -34,6 +34,56 @@
     chatLog.scrollTop = chatLog.scrollHeight;
   }
 
+  function appendSafeInlineMarkdown(parent, text) {
+    // This accepts only **bold**. Every other character is a text node, so
+    // model output can never become HTML or a clickable URL in the chat.
+    String(text || '').split(/(\*\*[^*\n]+\*\*)/g).forEach(function (part) {
+      if (part.length > 4 && part.slice(0, 2) === '**' && part.slice(-2) === '**') {
+        var strong = document.createElement('strong');
+        strong.textContent = part.slice(2, -2);
+        parent.appendChild(strong);
+      } else if (part) {
+        parent.appendChild(document.createTextNode(part));
+      }
+    });
+  }
+
+  function renderSafeAssistantMarkdown(bubble, text) {
+    // Deliberately small Markdown subset: bold, blank lines, ordered lists,
+    // and '-' bullets. It uses DOM nodes only — never innerHTML — and does
+    // not linkify URLs because product cards and modals own navigation.
+    var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    var i = 0;
+    while (i < lines.length) {
+      var ordered = lines[i].match(/^\s*\d+\.\s+(.+)$/);
+      var bullet = lines[i].match(/^\s*-\s+(.+)$/);
+      if (ordered || bullet) {
+        var list = document.createElement(ordered ? 'ol' : 'ul');
+        list.className = 'chat-markdown-list';
+        while (i < lines.length) {
+          var match = ordered
+            ? lines[i].match(/^\s*\d+\.\s+(.+)$/)
+            : lines[i].match(/^\s*-\s+(.+)$/);
+          if (!match) break;
+          var item = document.createElement('li');
+          appendSafeInlineMarkdown(item, match[1]);
+          list.appendChild(item);
+          i += 1;
+        }
+        bubble.appendChild(list);
+        continue;
+      }
+
+      if (lines[i] === '') {
+        bubble.appendChild(document.createElement('br'));
+      } else {
+        appendSafeInlineMarkdown(bubble, lines[i]);
+        if (i < lines.length - 1) bubble.appendChild(document.createElement('br'));
+      }
+      i += 1;
+    }
+  }
+
   function addBubble(role, text) {
     var row = document.createElement('div');
     row.className = 'msg-row ' + role;
@@ -43,7 +93,11 @@
 
     var bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
-    bubble.textContent = text || '';
+    if (role === 'agent') {
+      renderSafeAssistantMarkdown(bubble, text);
+    } else {
+      bubble.textContent = text || '';
+    }
     group.appendChild(bubble);
 
     row.appendChild(group);

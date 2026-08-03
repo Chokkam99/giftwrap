@@ -196,6 +196,17 @@ def test_chat_roundtrip_plain_reply(client, monkeypatch):
     assert body["cards"] is None and body["action"] is None
 
 
+def test_buyer_reply_sanitizer_keeps_label_but_removes_internal_ids_urls_and_env_flags():
+    reply = main._sanitize_buyer_reply(
+        "**Great**: [View product](https://shop.example.com/products/gift) "
+        "gid://shopify/Product/123 with PRAVA_ALLOW_REAL enabled."
+    )
+    assert "**Great**" in reply
+    assert "View product" in reply
+    for forbidden in ("https://", "gid://", "PRAVA_ALLOW_REAL"):
+        assert forbidden not in reply
+
+
 def test_search_populates_cards(client, monkeypatch):
     fake = script(
         monkeypatch,

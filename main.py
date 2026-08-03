@@ -114,11 +114,17 @@ buyer's budget, so the spend physically cannot exceed what they approved.
 
 Follow this flow:
 1. Gather the recipient, the budget, and the vibe/occasion. As soon as you know the budget and
-   recipient, call `set_gift_context` — no other tool works until you have.
+   recipient, call `set_gift_context` — no other tool works until you have. When the buyer gives
+   gender, age, style, or occasion alongside them (for example, "male, ₹2,000 for his wedding"),
+   record those details too and move straight to a search; do not repeat a long questionnaire for
+   details they already supplied. If age or style is genuinely missing and would make the search
+   much better, ask one short follow-up — never a long checklist.
 2. Find out who is picking the gift:
    * BUYER PICKS (the default — assume this unless told otherwise): search with
      `search_products`. Omit `store` to search every configured store at once
-     ({', '.join(UCP_STORES)}) concurrently. Product cards render automatically in the buyer UI:
+     ({', '.join(UCP_STORES)}) concurrently. Include any known occasion, gender, age range, and
+     style in the search terms; the server also applies the stored recipient context to rank and
+     filter results. Product cards render automatically in the buyer UI:
      after a successful search, reply with one short, natural sentence only (for example,
      "I found a few options within your budget."). Do NOT repeat product titles, prices, IDs,
      URLs, Markdown links, or a numbered list in your text.
@@ -181,7 +187,11 @@ TOOLS: list[ToolSpec] = [
           ["budget", "recipient"],
           budget=_field("Max total spend, e.g. '3000' or '₹3,000'."),
           recipient=_field("Who the gift is for."),
-          note=_field("Occasion / vibe / preferences.")),
+          note=_field("Occasion / vibe / preferences."),
+          gender=_field("Optional recipient gender or pronouns when the buyer supplied them."),
+          age_range=_field("Optional recipient age or age range when the buyer supplied it."),
+          occasion=_field("Optional occasion, such as wedding or birthday."),
+          preferences=_field("Optional style, interests, and no-gos.")),
     _tool("search_products",
           "Search live catalogs for gift options. If `store` is omitted, ALL configured stores "
           f"({', '.join(UCP_STORES)}) are searched concurrently and the results are merged.",
@@ -236,6 +246,12 @@ class Conversation:
     budget: float | None = None
     recipient: str | None = None
     note: str | None = None
+    # Explicit recipient cues are remembered independently from free-form chat so
+    # catalog relevance can be enforced deterministically, not left to an LLM.
+    gender: str | None = None
+    age_range: str | None = None
+    occasion: str | None = None
+    preferences: str | None = None
     # session_id -> {merchant_name, merchant_url, amount, iframe_url, expires_at,
     #                credential (server-only), txn_ref_id, polls, stub, completed}
     minted: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -497,16 +513,137 @@ def _stub_products(store: str, query: str, max_price: float | None, limit: int =
 # ---------------------------------------------------------------- tool handlers
 
 
+# These are intentionally narrow title signals, not a broad gender classifier.
+# A buyer who says the recipient is male should not be shown something explicitly
+# sold as a bridal / women's product, but neutral items remain valid options.
+MALE_CONTEXT_SIGNALS = re.compile(
+    r"\b(?:male|man|men|him|his|groom|husband|boyfriend|father|dad|brother|gentleman)\b",
+    re.IGNORECASE,
+)
+FEMALE_CODED_TITLE_PATTERNS = (
+    re.compile(r"\bbride\b", re.IGNORECASE),
+    re.compile(r"\bbridal\b", re.IGNORECASE),
+    re.compile(r"\bfor\s+her\b", re.IGNORECASE),
+    re.compile(r"\bwomen(?:'s)?\b", re.IGNORECASE),
+    re.compile(r"\bwoman\b", re.IGNORECASE),
+    re.compile(r"\bladies\b", re.IGNORECASE),
+    re.compile(r"\blady\b", re.IGNORECASE),
+    re.compile(r"\bgirls?\b", re.IGNORECASE),
+    re.compile(r"\bmaid\s+of\s+honou?r\b", re.IGNORECASE),
+    re.compile(r"\bbachelorette\b", re.IGNORECASE),
+    re.compile(r"\bhen\s+party\b", re.IGNORECASE),
+)
+MALE_AFFINITY_TITLE_PATTERNS = (
+    re.compile(r"\bfor\s+him\b", re.IGNORECASE),
+    re.compile(r"\bmen(?:'s)?\b", re.IGNORECASE),
+    re.compile(r"\bmale\b", re.IGNORECASE),
+    re.compile(r"\bgroom\b", re.IGNORECASE),
+    re.compile(r"\bhusband\b", re.IGNORECASE),
+    re.compile(r"\bboyfriend\b", re.IGNORECASE),
+    re.compile(r"\bgent(?:leman)?\b", re.IGNORECASE),
+)
+
+
+def _nonempty_text(value: Any) -> str | None:
+    """Normalize optional tool text without turning `None` into literal prose."""
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _infer_gender(*parts: str | None) -> str | None:
+    """Return only a deliberately explicit male cue; otherwise leave gender unknown."""
+    context = " ".join(part for part in parts if part)
+    return "male" if MALE_CONTEXT_SIGNALS.search(context) else None
+
+
+def _infer_age_range(*parts: str | None) -> str | None:
+    """Persist an explicit age, or a cautious relationship-based range when useful.
+
+    These ranges guide the agent's search phrasing and follow-up judgement; they
+    do not pretend that UCP merchant catalogs have reliable age metadata.
+    """
+    context = " ".join(part for part in parts if part).lower()
+    age_match = re.search(
+        r"\b(?:turning|age(?:d)?|is)\s*(\d{1,3})\b|\b(\d{1,3})\s*years?\s*old\b",
+        context,
+    )
+    if age_match:
+        age = int(age_match.group(1) or age_match.group(2))
+        if 0 <= age <= 12:
+            return "0–12"
+        if age <= 17:
+            return "13–17"
+        if age <= 24:
+            return "18–24"
+        if age <= 34:
+            return "25–34"
+        if age <= 44:
+            return "35–44"
+        if age <= 64:
+            return "45–64"
+        if age <= 120:
+            return "65+"
+    if re.search(r"\b(?:baby|infant|toddler)\b", context):
+        return "0–3"
+    if re.search(r"\b(?:child|kid|son|daughter)\b", context):
+        return "6–12"
+    if re.search(r"\b(?:teen|teenager)\b", context):
+        return "13–17"
+    if re.search(r"\b(?:mom|mother|dad|father|parent)\b", context):
+        return "45–64"
+    return None
+
+
+def _filter_and_rank_for_recipient(
+    products: list[dict], conv: Conversation | None
+) -> tuple[list[dict], int]:
+    """Apply a deterministic compatibility filter and a stable relevance ranking.
+
+    This is deliberately post-catalog: merchant UCP schemas do not expose a
+    reliable gender facet. We only suppress titles with an explicit incompatible
+    signal for a male recipient and otherwise preserve the merchant's ordering.
+    """
+    if conv is None or conv.gender != "male":
+        return products, 0
+
+    compatible: list[tuple[int, int, dict]] = []
+    dropped = 0
+    for index, product in enumerate(products):
+        title = str(product.get("title") or "")
+        if any(pattern.search(title) for pattern in FEMALE_CODED_TITLE_PATTERNS):
+            dropped += 1
+            continue
+        affinity = 0 if any(pattern.search(title) for pattern in MALE_AFFINITY_TITLE_PATTERNS) else 1
+        compatible.append((affinity, index, product))
+    compatible.sort(key=lambda entry: (entry[0], entry[1]))
+    return [product for _affinity, _index, product in compatible], dropped
+
+
 def _tool_set_gift_context(conv: Conversation, args: dict) -> dict:
     budget = _parse_amount(args.get("budget"))
     if budget is None or budget <= 0:
         return {"error": "Could not read a numeric budget. Ask the buyer for an amount."}
     conv.budget = budget
-    conv.recipient = args.get("recipient")
-    conv.note = args.get("note")
+    conv.recipient = _nonempty_text(args.get("recipient")) or conv.recipient
+    conv.note = _nonempty_text(args.get("note")) or conv.note
+    conv.occasion = _nonempty_text(args.get("occasion")) or conv.occasion
+    conv.preferences = _nonempty_text(args.get("preferences")) or conv.preferences
+    explicit_gender = _nonempty_text(args.get("gender"))
+    explicit_age_range = _nonempty_text(args.get("age_range"))
+    inferred_gender = _infer_gender(
+        explicit_gender, conv.recipient, conv.note, conv.occasion, conv.preferences
+    )
+    # Only record a supported, explicit signal. Unknown is safer than guessing.
+    if inferred_gender:
+        conv.gender = inferred_gender
+    conv.age_range = explicit_age_range or _infer_age_range(
+        conv.recipient, conv.note, conv.occasion, conv.preferences
+    ) or conv.age_range
     return {
         "ok": True, "budget": budget, "currency": CURRENCY,
         "recipient": conv.recipient, "note": conv.note,
+        "gender": conv.gender, "age_range": conv.age_range,
+        "occasion": conv.occasion, "preferences": conv.preferences,
         "guard": "Minting above this budget will be rejected by the server.",
     }
 
@@ -608,6 +745,7 @@ def _more_products(
     max_price: float | None,
     cursors: dict[str, str],
     shown_ids: set[str],
+    conv: Conversation | None = None,
     cap: int = MAX_SHOWN_PRODUCTS,
 ) -> tuple[list[dict], dict[str, str]]:
     """Fetch the next page(s) for an existing "show more" / "load more" session.
@@ -623,6 +761,7 @@ def _more_products(
         stores, query, max_price, cursors=cursors
     )
     products, _dropped = _within_budget(products, max_price)
+    products, _incompatible_dropped = _filter_and_rank_for_recipient(products, conv)
     # Some merchant pages repeat a product, including within one cursor page.
     # Deduplicate both against already-rendered cards and this new batch.
     seen_ids = set(shown_ids)
@@ -652,6 +791,7 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
     )
 
     products, dropped = _within_budget(products, max_price)
+    products, incompatible_dropped = _filter_and_rank_for_recipient(products, conv)
     products = products[:12]
 
     result: dict[str, Any] = {"stores_searched": stores}
@@ -686,14 +826,24 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
         result["max_price_enforced"] = max_price
     if dropped:
         result["filtered_out_over_budget"] = dropped
+    if incompatible_dropped:
+        result["filtered_out_incompatible"] = incompatible_dropped
     if not products and not result.get("stub"):
-        where = f" across {', '.join(stores)}" if len(stores) > 1 else ""
-        result["message"] = (
-            f"The catalog{where} returned nothing at or below {max_price:.2f} {CURRENCY} for "
-            f"{query!r}. Try a different search, or ask the buyer to raise the budget."
-            if max_price is not None
-            else f"The catalog{where} returned no products for {query!r}."
-        )
+        if incompatible_dropped:
+            # Do not fall back to clearly incompatible items merely to populate a
+            # card row. This string is passed through as buyer-safe text below.
+            result["user_message"] = (
+                "I couldn't find a strong match in this store; try another style or store."
+            )
+            result["message"] = result["user_message"]
+        else:
+            where = f" across {', '.join(stores)}" if len(stores) > 1 else ""
+            result["message"] = (
+                f"The catalog{where} returned nothing at or below {max_price:.2f} {CURRENCY} for "
+                f"{query!r}. Try a different search, or ask the buyer to raise the budget."
+                if max_price is not None
+                else f"The catalog{where} returned no products for {query!r}."
+            )
 
     # "Show more like this" pagination state — only for real (non-stub) results;
     # a stub search has no cursor and nothing more to page through.
@@ -1282,8 +1432,14 @@ def _safe_tool_error_message(result: dict[str, Any]) -> str:
 
 
 def _sanitize_buyer_reply(text: str) -> str:
-    """Defence in depth: internal product identifiers never belong in chat copy."""
-    text = re.sub(r"gid://[^\s)\]}]+", "", text or "")
+    """Defence in depth: internal IDs, URLs, and environment flags never belong in chat copy."""
+    text = text or ""
+    # Keep a human label if a model emitted a Markdown product link, but never
+    # put merchant URLs into a chat bubble (cards and the detail modal own it).
+    text = re.sub(r"\[([^\]]+)\]\(https?://[^\s)]+\)", r"\1", text)
+    text = re.sub(r"(?:https?://|www\.)[^\s)\]}]+", "", text)
+    text = re.sub(r"gid://[^\s)\]}]+", "", text)
+    text = re.sub(r"\b(?:PRAVA|UCP|LLM|ANTHROPIC|OPENAI|GEMINI)_[A-Z0-9_]+\b", "", text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
@@ -1367,6 +1523,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     action: dict | None = None
     has_more = False
     safe_error: str | None = None
+    search_user_message: str | None = None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
@@ -1393,6 +1550,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
             if call.name == "search_products":
                 cards = result.get("products", []) or cards
                 has_more = bool(result.get("has_more"))
+                search_user_message = result.get("user_message")
             elif call.name == "get_product" and result.get("product"):
                 cards = [result["product"]]
             elif call.name == "mint_scoped_card" and result.get("session_id"):
@@ -1415,11 +1573,13 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
                 # its diagnostic details are not buyer-facing information.
                 safe_error = _safe_tool_error_message(result)
                 break
-        if safe_error:
+        if safe_error or search_user_message:
             break
 
     if safe_error:
         reply = safe_error
+    elif search_user_message:
+        reply = search_user_message
     elif cards:
         # Product cards are the product presentation. Do not duplicate their
         # structured catalog data into a brittle Markdown list from the model.
@@ -1564,7 +1724,7 @@ def chat_more(conversation_id: str) -> dict:
         raise HTTPException(status_code=404, detail="No previous search to continue from.")
     ls = conv.last_search
     fresh, next_cursors = _more_products(
-        ls["stores"], ls["query"], ls["max_price"], ls["cursors"], ls["shown_ids"]
+        ls["stores"], ls["query"], ls["max_price"], ls["cursors"], ls["shown_ids"], conv
     )
     ls["cursors"] = next_cursors
     ls["shown_ids"] |= {p["id"] for p in fresh if p.get("id")}

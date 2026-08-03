@@ -108,6 +108,59 @@ def test_search_hard_filters_over_budget_results(monkeypatch):
     assert result["max_price_enforced"] == 3000.0
 
 
+def test_male_recipient_context_filters_bride_title_and_keeps_neutral_products(monkeypatch):
+    """Explicit recipient context must deterministically outrank catalog noise."""
+    fake = create_autospec(ucp_client.UCPClient, instance=True)
+    fake.search_products_page.return_value = ([
+        product("1499.00", '"The Bride Tribe" Jewellery Gift Box for Her', "gid://p/bride"),
+        product("1799.00", "Minimal Leather Card Holder", "gid://p/neutral"),
+        product("1899.00", "Classic Groom Gift Set", "gid://p/groom"),
+    ], None)
+    monkeypatch.setattr(main, "_load_ucp", lambda: fake)
+
+    conv = main.Conversation(id="male-context")
+    context = main._tool_set_gift_context(conv, {
+        "budget": "₹2,000", "recipient": "DC", "gender": "Male",
+        "occasion": "wedding", "note": "for his wedding",
+    })
+    result = main._tool_search_products(conv, {"query": "wedding gift", "store": main.DEFAULT_STORE})
+
+    assert context["gender"] == "male"
+    assert context["occasion"] == "wedding"
+    assert [card["title"] for card in result["products"]] == [
+        "Classic Groom Gift Set", "Minimal Leather Card Holder",
+    ]
+    assert result["filtered_out_incompatible"] == 1
+    assert '"The Bride Tribe" Jewellery Gift Box for Her' not in str(result["products"])
+
+
+def test_male_context_returns_safe_message_when_only_female_coded_titles_remain(monkeypatch):
+    fake = create_autospec(ucp_client.UCPClient, instance=True)
+    fake.search_products_page.return_value = ([
+        product("1499.00", '"The Bride Tribe" Jewellery Gift Box for Her', "gid://p/bride"),
+    ], None)
+    monkeypatch.setattr(main, "_load_ucp", lambda: fake)
+
+    conv = main.Conversation(id="male-no-match")
+    main._tool_set_gift_context(conv, {
+        "budget": "₹2,000", "recipient": "DC", "gender": "male", "occasion": "wedding",
+    })
+    result = main._tool_search_products(conv, {"query": "wedding gift", "store": main.DEFAULT_STORE})
+
+    assert result["products"] == []
+    assert result["user_message"] == (
+        "I couldn't find a strong match in this store; try another style or store."
+    )
+
+
+def test_context_persists_explicit_and_inferred_age_range():
+    conv = main.Conversation(id="age-context")
+    result = main._tool_set_gift_context(conv, {
+        "budget": "₹2,000", "recipient": "my dad", "note": "turning 60",
+    })
+    assert result["age_range"] == conv.age_range == "45–64"
+
+
 def test_explicit_max_price_below_budget_wins(monkeypatch):
     fake = create_autospec(ucp_client.UCPClient, instance=True)
     fake.search_products_page.return_value = (
