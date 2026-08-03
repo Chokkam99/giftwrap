@@ -449,11 +449,18 @@ def _prava_failure_reason(result: Any) -> str:
     Pulls the per-transaction `error` detail through instead of collapsing
     every failure into one generic string.
     """
-    details = [
-        str(err) for txn in (getattr(result, "transactions", None) or [])
-        if (err := getattr(txn, "error", None))
-    ]
-    suffix = f" Prava reported: {'; '.join(details)}" if details else ""
+    details: list[str] = []
+    for txn in getattr(result, "transactions", None) or []:
+        error = getattr(txn, "error", None)
+        if not error:
+            continue
+        if isinstance(error, dict):
+            code = error.get("code") or error.get("type")
+            message = error.get("message") or error.get("error")
+            details.append(": ".join(str(part) for part in (code, message) if part))
+        else:
+            details.append(str(error))
+    suffix = f" Prava reported: {'; '.join(detail for detail in details if detail)}." if details else ""
     return (
         "The Prava payment session failed and cannot be reused." + suffix +
         " Do NOT retry this transaction — explain the failure to the buyer and stop."
@@ -1151,11 +1158,15 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
             session = _fields(raw, ("session_id", "iframe_url", "expires_at"))
         except Exception as exc:
             degraded = _mark_degraded("prava", "create_session", exc)
+            error_code = getattr(exc, "code", None)
+            error_message = getattr(exc, "message", None)
+            detail = ": ".join(str(part) for part in (error_code, error_message) if part)
             return {
                 "error": "prava_session_failed",
                 "user_message": (
                     "We couldn't start the payment approval. Nothing was charged. "
-                    "Please try again."
+                    + (f"Prava reported {detail}. " if detail else "")
+                    + "Please fix that issue before starting a fresh payment session."
                 ),
                 # Diagnostics remain server-side; never put raw provider output
                 # into the tool result or buyer-facing response.
@@ -1460,7 +1471,10 @@ def _safe_tool_error_message(result: dict[str, Any]) -> str:
     if code in {"merchant_scope", "invalid_merchant_url"}:
         return "We couldn't start payment for that item. Nothing was charged. Please choose another option."
     if code == "payment_failed":
-        return "We couldn't complete the payment. Nothing was charged. Please try again."
+        return str(result.get("message") or (
+            "We couldn't complete the payment. Nothing was charged. "
+            "Do not retry this payment session."
+        ))
     if code:
         return "Something went wrong with that step. Nothing was charged. Please try again."
     return "Something went wrong. Please try again."

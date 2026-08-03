@@ -23,7 +23,7 @@ def make_client(handler) -> PravaClient:
     transport = httpx.MockTransport(handler)
     http_client = httpx.Client(
         base_url="https://sandbox.api.prava.space",
-        headers={"Authorization": "Bearer sk_test_fake", "Content-Type": "application/json"},
+        headers={"Authorization": "Bearer sk_test_fake"},
         transport=transport,
     )
     return PravaClient(secret_key="sk_test_fake", client=http_client)
@@ -177,6 +177,33 @@ def test_error_mapping_non_json_error_body():
     assert err.code is None
 
 
+def test_error_mapping_preserves_top_level_code_and_message():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"code": "PROVISION_ERROR", "message": "Request failed with status code 400"},
+        )
+
+    client = make_client(handler)
+
+    with pytest.raises(PravaError) as exc_info:
+        client.create_session(**create_session_kwargs())
+
+    assert exc_info.value.code == "PROVISION_ERROR"
+    assert exc_info.value.message == "Request failed with status code 400"
+
+
+def test_create_session_rejects_invalid_merchant_country_before_network_call():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("invalid merchant country must not reach Prava")
+
+    client = make_client(handler)
+    with pytest.raises(PravaError, match="two-letter ISO") as exc_info:
+        client.create_session(**create_session_kwargs(country_code_iso2="India"))
+
+    assert exc_info.value.code == "INVALID_MERCHANT_COUNTRY"
+
+
 # ---------------------------------------------------------------------------
 # wait_for_result returns as soon as a credential appears
 # ---------------------------------------------------------------------------
@@ -266,6 +293,19 @@ def test_wait_for_result_returns_on_terminal_status_without_credential():
     assert result.status == "failed"
     assert result.first_credential() is None
     assert result.is_terminal()
+
+
+def test_payment_result_get_never_advertises_an_empty_json_body():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("content-type") is None
+        assert request.content == b""
+        return httpx.Response(
+            200,
+            json={"session_id": SESSION_ID, "order_id": ORDER_ID, "status": "pending", "transactions": []},
+        )
+
+    client = make_client(handler)
+    assert client.get_payment_result(SESSION_ID).status == "pending"
 
 
 # ---------------------------------------------------------------------------

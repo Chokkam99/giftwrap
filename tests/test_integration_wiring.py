@@ -360,6 +360,33 @@ def test_card_status_uses_timeout_seconds_not_timeout(monkeypatch):
     assert "stub" not in pending
 
 
+def test_terminal_prava_failure_preserves_the_provider_code_without_retrying(monkeypatch):
+    fake = create_autospec(prava_client.PravaClient, instance=True)
+    fake.create_session.return_value = session_obj()
+    failed = payment_result("sess_live_1", with_credential=False)
+    failed.status = "failed"
+    failed.transactions[0].error = {
+        "code": "PROVISION_ERROR", "message": "Request failed with status code 400"
+    }
+    fake.wait_for_result.return_value = failed
+    monkeypatch.setattr(main, "_load_prava", lambda: fake)
+
+    conv = conversation()
+    main._tool_mint_scoped_card(conv, {
+        "merchant_name": GIVA_MERCHANT_NAME, "merchant_url": GIVA_MERCHANT_URL,
+        "amount": "2400.00", "description": "Silver earrings",
+    })
+
+    status = main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
+    again = main._tool_get_card_status(conv, {"session_id": "sess_live_1"})
+
+    assert status["terminal"] is True
+    assert "PROVISION_ERROR" in status["message"]
+    assert "Request failed with status code 400" in status["message"]
+    assert again == status
+    assert fake.wait_for_result.call_count == 1
+
+
 def test_approved_credential_is_captured_but_never_returned(monkeypatch):
     fake = create_autospec(prava_client.PravaClient, instance=True)
     fake.create_session.return_value = session_obj()

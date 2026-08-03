@@ -113,6 +113,38 @@
     return String(price);
   }
 
+  function passkeySupport() {
+    var ua = window.navigator.userAgent || '';
+    if (/Electron\/|\bCode\//.test(ua) || /;\s*wv\)/i.test(ua)) {
+      return Promise.resolve({
+        ok: false,
+        message: 'Passkey payments need Safari, Chrome, or another full browser — not an embedded preview or in-app browser.',
+      });
+    }
+    if (!window.isSecureContext) {
+      return Promise.resolve({
+        ok: false,
+        message: 'Passkey payments need a secure browser page. Open GiftWrap over HTTPS in a normal browser.',
+      });
+    }
+    var credential = window.PublicKeyCredential;
+    if (!credential || typeof credential.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
+      return Promise.resolve({
+        ok: false,
+        message: 'This browser cannot use a device passkey. Open GiftWrap in Safari or Chrome on a device with Face ID, Touch ID, or Windows Hello.',
+      });
+    }
+    return credential.isUserVerifyingPlatformAuthenticatorAvailable()
+      .then(function (available) {
+        return available
+          ? { ok: true }
+          : { ok: false, message: 'No device passkey is available. Use Safari or Chrome with Face ID, Touch ID, or Windows Hello.' };
+      })
+      .catch(function () {
+        return { ok: false, message: 'We could not verify passkey support in this browser. Open GiftWrap in a normal Safari or Chrome window.' };
+      });
+  }
+
   function placeholderImage() {
     var div = document.createElement('div');
     div.className = 'product-card-image-placeholder';
@@ -421,6 +453,11 @@
         "This opens Prava's secure checkout in a new tab. Approve there with your passkey, then confirm below.";
       panel.appendChild(desc);
 
+      var help = document.createElement('div');
+      help.className = 'action-panel-help';
+      help.textContent = 'Use a normal browser window. If Prava does not load, allow third-party cookies/storage and temporarily disable strict privacy extensions.';
+      panel.appendChild(help);
+
       var buttons = document.createElement('div');
       buttons.className = 'action-panel-buttons';
 
@@ -433,9 +470,7 @@
         '<circle cx="8" cy="15" r="4"></circle><path d="M10.5 12.5 20 3"></path>' +
         '<path d="M17 6l2 2"></path><path d="M14 9l2 2"></path></svg>' +
         '<span>Approve with passkey</span>';
-      openBtn.addEventListener('click', function () {
-        window.open(action.iframe_url, '_blank', 'noopener,noreferrer');
-      });
+      openBtn.disabled = true;
       buttons.appendChild(openBtn);
 
       var confirmBtn = document.createElement('button');
@@ -446,6 +481,7 @@
         'stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
         '<path d="M20 6 9 17l-5-5"></path></svg>' +
         "<span>I've approved it</span>";
+      confirmBtn.disabled = true;
       confirmBtn.addEventListener('click', function () {
         sendMessage('I completed the Prava approval');
       });
@@ -453,6 +489,23 @@
 
       panel.appendChild(buttons);
       group.appendChild(panel);
+      passkeySupport().then(function (support) {
+        if (!support.ok) {
+          help.classList.add('action-panel-help-error');
+          help.textContent = support.message;
+          return;
+        }
+        openBtn.disabled = false;
+        openBtn.addEventListener('click', function () {
+          var popup = window.open(action.iframe_url, '_blank', 'noopener,noreferrer');
+          if (!popup) {
+            help.classList.add('action-panel-help-error');
+            help.textContent = 'Your browser blocked the secure approval tab. Allow pop-ups for GiftWrap, then open a fresh payment session.';
+            return;
+          }
+          confirmBtn.disabled = false;
+        });
+      });
       scrollToBottom();
       return;
     }

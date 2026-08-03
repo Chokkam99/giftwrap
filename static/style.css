@@ -1041,6 +1041,18 @@ img {
   position: relative;
 }
 
+.action-panel-help {
+  margin-top: var(--space-2);
+  color: color-mix(in srgb, white 78%, var(--gold-200));
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+}
+
+.action-panel-help-error {
+  color: #fff0d0;
+  font-weight: 650;
+}
+
 .action-panel-buttons {
   display: flex;
   flex-wrap: wrap;

@@ -177,11 +177,18 @@ def mask_secret(value: Optional[str]) -> Optional[str]:
 class PravaError(Exception):
     """Raised when the Prava API returns a non-2xx response."""
 
-    def __init__(self, message: str, code: Optional[str] = None, http_status: Optional[int] = None):
+    def __init__(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        http_status: Optional[int] = None,
+        details: Any = None,
+    ):
         super().__init__(message)
         self.message = message
         self.code = code
         self.http_status = http_status
+        self.details = details
 
     def __repr__(self) -> str:
         return f"PravaError(message={self.message!r}, code={self.code!r}, http_status={self.http_status!r})"
@@ -366,14 +373,20 @@ class PravaClient:
         if response.status_code >= 300:
             code = None
             message = f"Prava API returned HTTP {response.status_code}"
+            details = None
             try:
                 body = response.json()
-                err = body.get("error", {})
-                code = err.get("code")
-                message = err.get("message", message)
+                # The documented shape is {"error": {code, message, details}},
+                # but preserve useful diagnostics if a sandbox route returns
+                # the error object at the top level instead.
+                err = body.get("error", body) if isinstance(body, dict) else {}
+                if isinstance(err, dict):
+                    code = err.get("code") or body.get("code")
+                    message = err.get("message") or body.get("message") or message
+                    details = err.get("details") or body.get("details")
             except ValueError:
                 pass
-            raise PravaError(message, code=code, http_status=response.status_code)
+            raise PravaError(message, code=code, http_status=response.status_code, details=details)
 
         if not response.content:
             return {}
@@ -405,6 +418,12 @@ class PravaClient:
         """
         user_email = validate_user_email(user_email)
         merchant_url = normalize_merchant_url(merchant_url)
+        country_code_iso2 = (country_code_iso2 or "").strip().upper()
+        if not re.fullmatch(r"[A-Z]{2}", country_code_iso2):
+            raise PravaError(
+                "country_code_iso2 must be a two-letter ISO country code.",
+                code="INVALID_MERCHANT_COUNTRY",
+            )
         payload: dict[str, Any] = {
             "user_id": user_id,
             "user_email": user_email,
