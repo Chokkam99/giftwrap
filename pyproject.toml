@@ -20,11 +20,6 @@ dev = ["pytest"]
 [tool.uv]
 package = false
 
-[[tool.uv.index]]
-# Corporate Nexus mirror is unreachable from this machine — pin to PyPI directly.
-url = "https://pypi.org/simple/"
-default = true
-
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
