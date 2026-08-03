@@ -20,6 +20,9 @@ dev = ["pytest"]
 [tool.uv]
 package = false
 
+[tool.vercel]
+entrypoint = "main:app"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
