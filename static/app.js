@@ -133,19 +133,23 @@
   }
 
   function approveProduct(product) {
-    var price = formatPrice(product.price, product.currency);
+    // The controlled demo card shows its real catalog price, but mints for the
+    // separately verified checkout cap (item + current checkout costs).
+    var approvalAmount = product.payment_cap || product.price;
+    var price = formatPrice(approvalAmount, product.currency);
     sendMessage("I'd like the " + (product.title || 'gift') + ' for ' + price + '.', {
       id: product.id,
       title: product.title,
-      price: product.price,
+      price: approvalAmount,
       store: product.merchant,
       product_url: product.product_url,
     });
   }
 
   function buildCard(card, index) {
+    var isSandboxCheckout = card.catalog_source === 'sandbox_checkout';
     var cardEl = document.createElement('div');
-    cardEl.className = 'product-card';
+    cardEl.className = 'product-card' + (isSandboxCheckout ? ' product-card-sandbox' : '');
     cardEl.style.animationDelay = index * 70 + 'ms';
 
     var frame = document.createElement('div');
@@ -168,6 +172,13 @@
     var body = document.createElement('div');
     body.className = 'product-card-body';
 
+    if (isSandboxCheckout) {
+      var sandboxLabel = document.createElement('span');
+      sandboxLabel.className = 'sandbox-checkout-label';
+      sandboxLabel.textContent = 'Sandbox checkout item';
+      body.appendChild(sandboxLabel);
+    }
+
     var title = document.createElement('div');
     title.className = 'product-card-title';
     title.textContent = card.title || 'Untitled gift';
@@ -185,10 +196,24 @@
     price.textContent = formatPrice(card.price, card.currency);
     body.appendChild(price);
 
+    if (isSandboxCheckout && card.checkout_note) {
+      var sandboxNote = document.createElement('div');
+      sandboxNote.className = 'sandbox-checkout-note';
+      sandboxNote.textContent = card.checkout_note;
+      body.appendChild(sandboxNote);
+    }
+
+    if (isSandboxCheckout && card.payment_cap) {
+      var sandboxCap = document.createElement('div');
+      sandboxCap.className = 'sandbox-checkout-cap';
+      sandboxCap.textContent = 'Payment cap: ' + formatPrice(card.payment_cap, card.currency);
+      body.appendChild(sandboxCap);
+    }
+
     var btn = document.createElement('button');
     btn.className = 'product-card-btn';
     btn.type = 'button';
-    btn.textContent = 'Gift this';
+    btn.textContent = isSandboxCheckout ? 'Try sandbox checkout' : 'Gift this';
     btn.addEventListener('click', function (e) {
       e.stopPropagation();
       approveProduct(card);
@@ -197,9 +222,11 @@
 
     cardEl.appendChild(body);
 
-    // Click anywhere on the card (not the CTA) opens the detail modal.
+    // UCP cards open the detail modal. The controlled checkout card is not a
+    // UCP result and deliberately has one clear action only.
     cardEl.addEventListener('click', function (e) {
       if (e.target.closest('.product-card-btn')) return;
+      if (isSandboxCheckout) return;
       if (window.GiftModal) {
         window.GiftModal.open({
           product: card,
@@ -214,21 +241,53 @@
     return cardEl;
   }
 
-  function renderCards(group, cards, hasMore) {
-    if (!cards || !cards.length) return;
+  function renderCards(group, cards, hasMore, sandboxCheckoutItem) {
+    var hasCards = cards && cards.length;
+    if (!hasCards && !sandboxCheckoutItem) return;
 
-    var row = document.createElement('div');
-    row.className = 'card-row';
-    cards.forEach(function (card, index) {
-      row.appendChild(buildCard(card, index));
-    });
-    group.appendChild(row);
+    var row = null;
+    if (hasCards) {
+      row = document.createElement('div');
+      row.className = 'card-row';
+      cards.forEach(function (card, index) {
+        row.appendChild(buildCard(card, index));
+      });
+      group.appendChild(row);
+    }
 
-    if (hasMore) {
+    if (hasMore && row) {
       appendShowMoreChip(group, row, cards.length);
     }
 
+    if (sandboxCheckoutItem) {
+      renderSandboxCheckoutItem(group, sandboxCheckoutItem);
+    }
+
     scrollToBottom();
+  }
+
+  function renderSandboxCheckoutItem(group, item) {
+    var existing = group.querySelector('.sandbox-checkout-section');
+    if (existing) existing.remove();
+
+    var section = document.createElement('section');
+    section.className = 'sandbox-checkout-section';
+
+    var heading = document.createElement('div');
+    heading.className = 'sandbox-checkout-heading';
+    heading.textContent = 'Ready to try the payment flow?';
+    section.appendChild(heading);
+
+    var desc = document.createElement('div');
+    desc.className = 'sandbox-checkout-description';
+    desc.textContent = 'Catalog items above are for browsing. This verified demo-store item is the safe sandbox checkout path.';
+    section.appendChild(desc);
+
+    var row = document.createElement('div');
+    row.className = 'card-row sandbox-checkout-row';
+    row.appendChild(buildCard(item, 0));
+    section.appendChild(row);
+    group.appendChild(section);
   }
 
   function appendShowMoreChip(group, row, startIndex) {
@@ -523,7 +582,12 @@
         setTyping(false);
         var group = addBubble('agent', data && data.reply ? data.reply : '');
         updateBudget(data && data.budget);
-        renderCards(group, data && data.cards, data && data.has_more);
+        renderCards(
+          group,
+          data && data.cards,
+          data && data.has_more,
+          data && data.sandbox_checkout_item
+        );
         renderAction(group, data && data.action, currentBudget);
       })
       .catch(function (err) {

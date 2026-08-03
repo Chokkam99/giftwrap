@@ -50,11 +50,13 @@ log = logging.getLogger("agentic_gifting")
 
 MAX_TOOL_ITERATIONS = 10
 DEFAULT_STORE = os.getenv("UCP_DEFAULT_STORE", "giva-jewelry.myshopify.com")
-# Our own demo merchant — also speaks UCP (verified live), so the whole demo
-# (discovery -> pick -> mint -> checkout) can run on one store via the same
-# protocol as the real ones. Listed last so it doesn't dominate breadth shots
-# against the real merchants below.
+# Our controlled Shopify dev store. It remains storefront-password-gated; the
+# checkout runner is the only code allowed to traverse that gate. The buyer
+# catalog must never depend on this store's UCP search (it reliably returns no
+# buyer-visible results while gated), so it is exposed separately as a clearly
+# labelled sandbox checkout item below.
 DEMO_STORE = "agentic-gifting-demo.myshopify.com"
+DEMO_MERCHANT_NAME = "GiftWrap Demo Store"
 # Multi-store catalog: when a tool call omits `store`, every one of these is searched
 # concurrently and the results are merged (see _multi_store_search). salty.co.in,
 # plumgoodness.com and xyxxcrew.com were verified live (WP-BROWSE) — discovery +
@@ -64,26 +66,17 @@ UCP_STORES = [
     s.strip() for s in
     os.getenv(
         "UCP_STORES",
-        f"giva-jewelry.myshopify.com,mamaearth.in,salty.co.in,plumgoodness.com,xyxxcrew.com,{DEMO_STORE}",
+        "giva-jewelry.myshopify.com,mamaearth.in,salty.co.in,plumgoodness.com,xyxxcrew.com",
     ).split(",")
     if s.strip()
 ] or [DEFAULT_STORE]
-# Demo-focus override: restrict the catalog to just our own demo store. Used for
-# the scripted transaction take so the agent finds the purchasable ski wax
-# cleanly, without real-merchant search noise. Off by default.
+# Legacy demo-focus override. A password-gated dev store cannot reliably serve
+# buyer catalog results, so this intentionally disables UCP browsing instead
+# of producing an empty, misleading search. The separately-labelled sandbox
+# checkout item remains available for the one controlled payment flow.
 if os.getenv("UCP_DEMO_STORE_ONLY", "").strip().lower() in {"1", "true", "yes"}:
-    UCP_STORES = [DEMO_STORE]
-# agentic-gifting-demo.myshopify.com's storefront is password-protected. Discovery,
-# full-catalog listing (empty query), and get_product all work fine through the
-# password gate — but its merchant-side free-text search reliably returns zero
-# products for ANY non-empty query (verified: "ski", "wax", "ski wax", "board",
-# even single-letter queries that are substrings of every title, all returned
-# nothing; giva-jewelry's search, on a non-gated store, filters correctly for
-# comparison). Likely the predictive-search index the app uses respects the
-# password lock even though the UCP app-proxy listing/lookup paths don't. Rather
-# than fabricate data, we fall back to the (real) unfiltered listing and filter
-# it client-side by keyword — see _multi_store_search.
-UCP_QUERY_FILTER_FALLBACK_STORES = {DEMO_STORE}
+    UCP_STORES = []
+UCP_QUERY_FILTER_FALLBACK_STORES: set[str] = set()
 # Cap on total products shown across "show more" / "load more" pagination, per
 # browsing session (buyer chat conversation, or one recipient gift-link query).
 MAX_SHOWN_PRODUCTS = 36
@@ -95,8 +88,51 @@ BUYER_ID = os.getenv("PRAVA_USER_ID", "agentic-gifting-buyer")
 # every step and then fails at the very last one (PASSKEY_REG_FAILED).
 # example.com is fine: .com is a real TLD.
 BUYER_EMAIL = os.getenv("PRAVA_USER_EMAIL", "gifting-demo@example.com")
-# Prava's create_session requires a merchant country; our demo merchants are Indian.
-MERCHANT_COUNTRY = os.getenv("PRAVA_MERCHANT_COUNTRY", "IN")
+# This describes the controlled demo merchant's legal/business country, not the
+# shopper's market or checkout currency. Keep the existing variable as a
+# backwards-compatible fallback, but prefer the explicit name going forward.
+_demo_country_raw = os.getenv("PRAVA_DEMO_MERCHANT_COUNTRY") or os.getenv(
+    "PRAVA_MERCHANT_COUNTRY", "US"
+)
+DEMO_MERCHANT_COUNTRY = _demo_country_raw.strip().upper()
+if not re.fullmatch(r"[A-Z]{2}", DEMO_MERCHANT_COUNTRY):
+    raise RuntimeError("PRAVA_DEMO_MERCHANT_COUNTRY must be a two-letter ISO country code.")
+
+# These countries are metadata for known UCP catalog merchants only. The
+# sandbox boundary below prevents sessions for every external merchant, but
+# keeping the mapping explicit makes any future production rollout reviewable
+# instead of silently applying one global country to every store.
+MERCHANT_COUNTRY_BY_HOST = {
+    "giva-jewelry.myshopify.com": "IN",
+    "mamaearth.in": "IN",
+    "salty.co.in": "IN",
+    "plumgoodness.com": "IN",
+    "xyxxcrew.com": "IN",
+    DEMO_STORE: DEMO_MERCHANT_COUNTRY,
+}
+
+# This card is deliberately not a UCP result. Its canonical one-time-purchase
+# details were verified in the controlled dev store; the URL can be overridden
+# only through the existing local checkout configuration. No buyer-facing flow
+# ever needs the storefront password.
+SANDBOX_CHECKOUT_PRODUCT_URL = os.getenv(
+    "SHOPIFY_DEV_STORE_PRODUCT_URL",
+    f"https://{DEMO_STORE}/products/selling-plans-ski-wax",
+).strip()
+SANDBOX_CHECKOUT_PRODUCT_TITLE = os.getenv(
+    "SHOPIFY_DEMO_PRODUCT_TITLE", "Selling Plans Ski Wax"
+).strip()
+SANDBOX_CHECKOUT_PRODUCT_PRICE = os.getenv("SHOPIFY_DEMO_PRODUCT_PRICE", "1499.00").strip()
+SANDBOX_CHECKOUT_PRODUCT_CURRENCY = os.getenv(
+    "SHOPIFY_DEMO_PRODUCT_CURRENCY", CURRENCY
+).strip().upper()
+# The card cap must cover the real checkout total, not just the catalog item
+# price. ₹1,945.70 is the current dry-run verified total for the canonical
+# one-time purchase (₹1,499 item + current duties/tax); re-verify and update
+# this local setting whenever the Shopify market, shipping, or tax setup moves.
+SANDBOX_CHECKOUT_PAYMENT_CAP = os.getenv(
+    "SHOPIFY_DEMO_CHECKOUT_CAP", "1945.70"
+).strip()
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -121,23 +157,26 @@ Follow this flow:
    much better, ask one short follow-up — never a long checklist.
 2. Find out who is picking the gift:
    * BUYER PICKS (the default — assume this unless told otherwise): search with
-     `search_products`. Omit `store` to search every configured store at once
-     ({', '.join(UCP_STORES)}) concurrently. Include any known occasion, gender, age range, and
-     style in the search terms; the server also applies the stored recipient context to rank and
-     filter results. Product cards render automatically in the buyer UI:
+     `search_products`. Omit `store` to search every configured catalog store at once.
+     Include any known occasion, gender, age range, and style in the search terms; the server also
+     applies the stored recipient context to rank and filter results. Product cards render
+     automatically in the buyer UI:
      after a successful search, reply with one short, natural sentence only (for example,
      "I found a few options within your budget."). Do NOT repeat product titles, prices, IDs,
      URLs, Markdown links, or a numbered list in your text.
+     Third-party catalog cards are for browsing only in this sandbox. The separately labelled
+     "Sandbox checkout item" is the only card that can start a payment; never call
+     `mint_scoped_card` for a third-party catalog merchant.
    * RECIPIENT PICKS ("let them pick", "let her choose", "surprise them", etc.): call
      `create_gift_link` with a short warm note capturing the occasion/vibe, then give the buyer the
      returned link to share. Later, when the buyer asks whether the recipient has picked yet, call
      `get_gift_status` with that token. If nothing is picked, say so warmly and suggest checking
-     back later. Once `get_gift_status` shows a picked product, treat it exactly like the buyer's
-     own explicit approval in step 3 — proceed straight to minting for that exact product, no
-     further confirmation needed.
-3. NEVER call `mint_scoped_card` until a specific product has been explicitly approved — either by
-   the buyer directly, or by the recipient through a gift link (confirmed via `get_gift_status`).
-   Mint for the exact price of that product, scoped to that merchant.
+     back later. A recipient-picked third-party item is saved as a browsing choice; in this
+     sandbox, point the buyer to the separate Sandbox checkout item before payment.
+3. NEVER call `mint_scoped_card` until the buyer explicitly approves the separate Sandbox checkout
+   item. In this sandbox, never mint or checkout a third-party catalog item, even if the buyer or
+   recipient selected it. Explain briefly that it remains browseable and point them to the
+   Sandbox checkout item instead.
 4. After minting, tell the buyer to approve the payment in the Prava window that just opened.
 5. Poll `get_card_status`. While it is pending, tell the buyer to finish the approval. Once it is
    ready, call `complete_checkout` for the approved product and present the receipt (order id,
@@ -146,11 +185,10 @@ Follow this flow:
 The buyer's UI can send a structured product selection with their natural confirmation. Treat that
 selection as the explicit approval for the exact product. The legacy literal message below may
 still arrive from an older UI; recognise it, but never echo its internal product ID.
-  * "I approve: {{title}} (id {{id}}) at {{price}}" — the buyer pressed "Gift this" on that exact
-    product card. This IS the explicit approval required by step 3. Do not search again and do not
-    ask them to confirm a second time: call `mint_scoped_card` ONCE for that product, with
-    `amount` set to that exact price and `merchant_url` set to that product's store URL, then tell
-    them to approve in the Prava window that just opened.
+  * "I approve: {{title}} (id {{id}}) at {{price}}" — the buyer pressed a product card. This is
+    explicit approval only when the card is the labelled Sandbox checkout item. Never echo its
+    internal ID. If it was a third-party browse card, do not mint; point them to the Sandbox
+    checkout item instead.
   * "I completed the Prava approval" — the buyer says they finished the Prava window. Call
     `get_card_status` with the `session_id` you got back from `mint_scoped_card`. If it comes back
     pending, say so warmly and ask them to finish the Prava window (they can tell you again). Once
@@ -193,8 +231,9 @@ TOOLS: list[ToolSpec] = [
           occasion=_field("Optional occasion, such as wedding or birthday."),
           preferences=_field("Optional style, interests, and no-gos.")),
     _tool("search_products",
-          "Search live catalogs for gift options. If `store` is omitted, ALL configured stores "
-          f"({', '.join(UCP_STORES)}) are searched concurrently and the results are merged.",
+          "Search live catalogs for browse-only gift options. If `store` is omitted, all configured "
+          "catalog stores are searched concurrently and the results are merged."
+          " The separate Sandbox checkout item is the only payable card in this build.",
           ["query"],
           store=_field("Store domain. Omit to search every configured store at once."),
           query=_field("What to search for."),
@@ -485,6 +524,67 @@ def _same_merchant(a: str | None, b: str | None) -> bool:
     ha = (urlparse(a or "").hostname or "").lower().removeprefix("www.")
     hb = (urlparse(b or "").hostname or "").lower().removeprefix("www.")
     return bool(ha) and ha == hb
+
+
+def _merchant_host(url: str) -> str:
+    """Return a normalized merchant host without accepting it as a checkout URL."""
+    return (urlparse(url or "").hostname or "").rstrip(".").lower().removeprefix("www.")
+
+
+def merchant_country_for_url(merchant_url: str) -> str | None:
+    """Resolve country metadata for a reviewed merchant origin.
+
+    This is deliberately an exact-host map, rather than a guessed TLD or a
+    global environment value. A country is legally meaningful merchant data;
+    `.in` or a buyer's currency are not enough to infer it for arbitrary hosts.
+    """
+    return MERCHANT_COUNTRY_BY_HOST.get(_merchant_host(merchant_url))
+
+
+def _is_controlled_demo_store(url: str) -> bool:
+    return _merchant_host(url) == DEMO_STORE
+
+
+def _sandbox_checkout_item() -> dict[str, Any] | None:
+    """Return the separate, verified dev-store card used for sandbox payment.
+
+    It intentionally never invokes UCP or reads the password-gated storefront.
+    Its canonical fields are local configuration backed by the previously
+    verified demo product; malformed or off-store configuration simply removes
+    the card rather than exposing a possibly-payable external product.
+    """
+    price = _parse_amount(SANDBOX_CHECKOUT_PRODUCT_PRICE)
+    payment_cap = _parse_amount(SANDBOX_CHECKOUT_PAYMENT_CAP)
+    if (
+        not _is_controlled_demo_store(SANDBOX_CHECKOUT_PRODUCT_URL)
+        or price is None or price <= 0
+        or payment_cap is None or payment_cap < price
+    ):
+        log.error(
+            "sandbox checkout item unavailable: configure a positive item price and checkout cap for %s",
+            DEMO_STORE,
+        )
+        return None
+    return {
+        "id": "giftwrap:sandbox-checkout-item",
+        "title": SANDBOX_CHECKOUT_PRODUCT_TITLE or "Demo-store item",
+        "price": f"{price:.2f}",
+        "currency": SANDBOX_CHECKOUT_PRODUCT_CURRENCY or CURRENCY,
+        "image_url": None,
+        "product_url": SANDBOX_CHECKOUT_PRODUCT_URL,
+        "merchant": DEMO_MERCHANT_NAME,
+        "variant_id": None,
+        "catalog_source": "sandbox_checkout",
+        "checkout_note": "One-time purchase on the GiftWrap demo store.",
+        "payment_cap": f"{payment_cap:.2f}",
+    }
+
+
+def _sandbox_payment_boundary_message() -> str:
+    return (
+        "You can browse that item, but this demo can complete checkout only for the "
+        "Sandbox checkout item. Choose the demo-store item to continue."
+    )
 
 
 # ------------------------------------------------------------------------- stubs
@@ -820,6 +920,17 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
         if p.get("id"):
             conv.products[p["id"]] = dict(p)
 
+    # Payment is deliberately separated from UCP browsing: the password-gated
+    # dev store cannot reliably provide buyer catalog results, so expose one
+    # verified controlled item as an explicitly-labelled sandbox card instead.
+    # It is never merged into `products`, which prevents callers from treating
+    # it as a UCP discovery result.
+    sandbox_item = _sandbox_checkout_item()
+    if sandbox_item is not None:
+        conv.products[sandbox_item["id"]] = dict(sandbox_item)
+        conv.prices[sandbox_item["product_url"]] = float(sandbox_item["price"])
+        result["sandbox_checkout_item"] = sandbox_item
+
     result["count"] = len(products)
     result["products"] = products
     if max_price is not None:
@@ -843,6 +954,11 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
                 f"{query!r}. Try a different search, or ask the buyer to raise the budget."
                 if max_price is not None
                 else f"The catalog{where} returned no products for {query!r}."
+            )
+        if sandbox_item is not None and not result.get("user_message"):
+            result["user_message"] = (
+                "I couldn't find a browse result for that search. You can still try the "
+                "Sandbox checkout item below."
             )
 
     # "Show more like this" pagination state — only for real (non-stub) results;
@@ -1081,6 +1197,31 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
     if merchant_url != raw_merchant_url:
         log.info("normalized merchant_url %r -> %r", raw_merchant_url, merchant_url)
 
+    # SANDBOX PAYMENT BOUNDARY — UCP catalog access is read-only for external
+    # merchants. Never create a Prava session for one, because this build's
+    # only controlled checkout target is our password-gated Shopify dev store.
+    # This runs before loading the client, so an external card click cannot
+    # accidentally consume a session/API quota slot.
+    if not _is_controlled_demo_store(merchant_url):
+        log.info("sandbox mint refused for browse-only merchant host=%s", _merchant_host(merchant_url))
+        return {
+            "error": "sandbox_checkout_requires_demo_item",
+            "user_message": _sandbox_payment_boundary_message(),
+        }
+
+    merchant_country = merchant_country_for_url(merchant_url)
+    if merchant_country is None:
+        # Should be unreachable for DEMO_STORE, but fail closed if the constant
+        # or configuration is ever changed without an explicit country review.
+        log.error("sandbox mint refused: no country mapping for host=%s", _merchant_host(merchant_url))
+        return {
+            "error": "merchant_country_unconfigured",
+            "user_message": "We couldn't start the payment approval. Nothing was charged. Please try again.",
+        }
+    # The only payable merchant in this build is our own controlled dev store;
+    # do not let a model-provided catalog label become card-network metadata.
+    merchant_name = DEMO_MERCHANT_NAME
+
     session: dict[str, Any] | None = None
     stub = False
     degraded: str | None = None
@@ -1118,7 +1259,7 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
                 currency=CURRENCY,
                 merchant_name=merchant_name,
                 merchant_url=merchant_url,
-                country_code_iso2=MERCHANT_COUNTRY,
+                country_code_iso2=merchant_country,
                 product_details=[
                     {"description": description, "unit_price": amount_str, "quantity": 1}
                 ],
@@ -1149,6 +1290,7 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
 
     conv.minted[session["session_id"]] = {
         "merchant_name": merchant_name, "merchant_url": merchant_url,
+        "merchant_country": merchant_country,
         "amount": amount, "iframe_url": session["iframe_url"],
         "expires_at": session["expires_at"], "credential": None,
         "txn_ref_id": None, "polls": 0, "stub": stub, "completed": False,
@@ -1262,6 +1404,15 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
     if not record["credential"]:
         return {"error": "Card not approved yet. Call get_card_status until ready is true."}
 
+    # Defence in depth for records minted before a code deploy: a card that is
+    # not tied to the controlled demo store must never reach browser checkout.
+    if not _is_controlled_demo_store(product_url) or not _is_controlled_demo_store(record["merchant_url"]):
+        log.warning("sandbox checkout refused for non-demo product host=%s", _merchant_host(product_url))
+        return {
+            "error": "sandbox_checkout_requires_demo_item",
+            "user_message": _sandbox_payment_boundary_message(),
+        }
+
     # Re-check the guard at spend time.
     price = conv.prices.get(product_url)
     if conv.budget is not None:
@@ -1334,8 +1485,18 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
                 status="APPROVED" if outcome.get("success") else "DECLINED",
             )
         except Exception as exc:
+            # In the sandbox, a merchant checkout may be verified even when
+            # Prava's dashboard later labels/reporting of that attempt failed.
+            # The buyer receipt therefore follows the verified Shopify order,
+            # not this asynchronous reporting acknowledgement. Keep the raw
+            # diagnostic server-side for operators; never hand it to the model.
             _mark_degraded("prava", "report_status", exc)
-            outcome["report_status_failed"] = str(exc)
+            record["prava_report_status"] = {
+                "state": "failed", "error": _exc_detail(exc),
+            }
+            log.warning("Prava status report failed after checkout session=%s: %s", session_id, exc)
+        else:
+            record["prava_report_status"] = {"state": "reported"}
 
     record["completed"] = True
     record["credential"] = None  # burn the one-time credential
@@ -1480,10 +1641,13 @@ def approve_selection_turn(conv: Conversation, selection: "ProductSelection") ->
     product_url = product.get("product_url") or ""
     parsed = urlparse(product_url)
     merchant_url = f"https://{parsed.netloc}" if parsed.netloc else f"https://{product.get('merchant', '')}"
+    # The explicit sandbox card carries a verified final checkout cap separate
+    # from its catalog price. Ordinary browse cards use their catalog price.
+    approval_amount = product.get("payment_cap") or product.get("price")
     result = _tool_mint_scoped_card(conv, {
         "merchant_name": product.get("merchant") or "GiftWrap merchant",
         "merchant_url": merchant_url,
-        "amount": product.get("price"),
+        "amount": approval_amount,
         "description": product.get("title") or "Gift",
     })
     if result.get("error"):
@@ -1534,6 +1698,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     has_more = False
     safe_error: str | None = None
     search_user_message: str | None = None
+    sandbox_checkout_item: dict[str, Any] | None = None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
@@ -1561,6 +1726,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
                 cards = result.get("products", []) or cards
                 has_more = bool(result.get("has_more"))
                 search_user_message = result.get("user_message")
+                sandbox_checkout_item = result.get("sandbox_checkout_item")
             elif call.name == "get_product" and result.get("product"):
                 cards = [result["product"]]
             elif call.name == "mint_scoped_card" and result.get("session_id"):
@@ -1604,6 +1770,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
         "reply": reply,
         "cards": cards or None,
         "action": action,
+        "sandbox_checkout_item": sandbox_checkout_item,
         "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
         # True when the search that produced `cards` has another page — drives the
         # "Show more like this" chip. False (never null) so the UI never has to guess.

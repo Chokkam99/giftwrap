@@ -132,6 +132,8 @@ def conversation_tool_result(conversation_id: str, tool_call_id: str) -> dict:
 
 
 CONTEXT = ToolUse("set_gift_context", {"budget": "₹3,000", "recipient": "my sister"}, "t_ctx")
+DEMO_MERCHANT_URL = f"https://{main.DEMO_STORE}"
+DEMO_PRODUCT_URL = f"{DEMO_MERCHANT_URL}/products/selling-plans-ski-wax"
 
 
 # ------------------------------------------------------------------------ tests
@@ -257,8 +259,8 @@ def test_structured_card_selection_keeps_id_internal_and_safely_handles_disabled
     conv.budget = 100.0
     conv.products["gid://shopify/Product/4433275322458"] = {
         "id": "gid://shopify/Product/4433275322458", "title": "Gift Wrap",
-        "price": "50.00", "currency": "INR", "merchant": "demo.myshopify.com",
-        "product_url": "https://demo.myshopify.com/products/gift-wrap",
+        "price": "50.00", "currency": "INR", "merchant": main.DEMO_MERCHANT_NAME,
+        "product_url": DEMO_PRODUCT_URL,
     }
     monkeypatch.setattr(main, "_load_prava", lambda: object())
     monkeypatch.delenv("PRAVA_ALLOW_REAL", raising=False)
@@ -273,6 +275,26 @@ def test_structured_card_selection_keeps_id_internal_and_safely_handles_disabled
     rendered = json.dumps(body)
     for forbidden in ("gid://", "PRAVA_ALLOW_REAL", "server-side", "test environment", "card creation"):
         assert forbidden not in rendered
+
+
+def test_third_party_card_selection_is_browse_only_and_never_loads_prava(client, monkeypatch):
+    conv = main.get_conversation("browse-only")
+    conv.budget = 2000.0
+    conv.products["salty-item"] = {
+        "id": "salty-item", "title": "Gift Box", "price": "1499.00", "currency": "INR",
+        "merchant": "salty.co.in", "product_url": "https://salty.co.in/products/gift-box",
+    }
+    monkeypatch.setattr(
+        main, "_load_prava", lambda: pytest.fail("third-party selection must not load Prava")
+    )
+
+    body = client.post("/chat", json={
+        "conversation_id": "browse-only", "message": "I'd like the Gift Box.",
+        "selection": {"id": "salty-item", "title": "Gift Box", "price": "1499.00"},
+    }).json()
+
+    assert body["action"] is None
+    assert body["reply"] == main._sandbox_payment_boundary_message()
 
 
 def test_show_more_appends_fresh_products_and_reports_terminal_state(client, monkeypatch):
@@ -335,7 +357,7 @@ def test_budget_guard_rejects_over_budget_mint(client, monkeypatch):
 def test_mint_returns_approval_action_and_never_leaks_credentials(client, monkeypatch):
     mint = ToolUse(
         "mint_scoped_card",
-        {"merchant_name": "GIVA", "merchant_url": "https://giva-jewelry.myshopify.com",
+        {"merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
          "amount": "2400.00", "description": "Silver earrings"},
         "t_mint",
     )
@@ -381,7 +403,7 @@ def _mint_and_approve(client, monkeypatch, conversation_id: str, amount: str = "
         Response([CONTEXT]),
         Response([ToolUse(
             "mint_scoped_card",
-            {"merchant_name": "GIVA", "merchant_url": "https://giva-jewelry.myshopify.com",
+            {"merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
              "amount": amount, "description": "Silver earrings"},
             "t_mint",
         )]),
@@ -405,7 +427,7 @@ def test_full_stub_flow_reaches_receipt(client, monkeypatch):
         Response([ToolUse(
             "complete_checkout",
             {"session_id": session_id,
-             "product_url": "https://giva-jewelry.myshopify.com/products/silver-earrings-1"},
+             "product_url": DEMO_PRODUCT_URL},
             "t_done",
         )]),
         Response([Text("Ordered! Here is the receipt.")]),
@@ -415,7 +437,7 @@ def test_full_stub_flow_reaches_receipt(client, monkeypatch):
     assert body["action"]["type"] == "receipt"
     assert body["action"]["order_id"].startswith("STUB-")
     assert body["action"]["amount"] == "2400.00"
-    assert body["action"]["merchant"] == "GIVA"
+    assert body["action"]["merchant"] == main.DEMO_MERCHANT_NAME
     assert tool_results(fake)["t_done"]["payload"]["status"] == "paid"
 
     record = main.CONVERSATIONS["c6"].minted[session_id]
@@ -437,7 +459,7 @@ def test_checkout_refuses_a_different_merchant(client, monkeypatch):
     body = client.post("/chat", json={"conversation_id": "c7", "message": "buy elsewhere"}).json()
     result = conversation_tool_result("c7", "t_wrong")
     assert result["is_error"] is True
-    assert result["payload"]["error"] == "merchant_scope"
+    assert result["payload"]["error"] == "sandbox_checkout_requires_demo_item"
     assert body["action"] is None
     assert main.CONVERSATIONS["c7"].minted[session_id]["completed"] is False
 
@@ -448,7 +470,7 @@ def test_checkout_requires_approval_first(client, monkeypatch):
         Response([CONTEXT]),
         Response([ToolUse(
             "mint_scoped_card",
-            {"merchant_name": "GIVA", "merchant_url": "https://giva-jewelry.myshopify.com",
+            {"merchant_name": main.DEMO_MERCHANT_NAME, "merchant_url": DEMO_MERCHANT_URL,
              "amount": "1000.00", "description": "Ring"},
             "t_mint",
         )]),
@@ -463,7 +485,7 @@ def test_checkout_requires_approval_first(client, monkeypatch):
         Response([ToolUse(
             "complete_checkout",
             {"session_id": session_id,
-             "product_url": "https://giva-jewelry.myshopify.com/products/ring-1"},
+             "product_url": DEMO_PRODUCT_URL},
             "t_early_checkout",
         )]),
         Response([Text("Please approve first.")]),
