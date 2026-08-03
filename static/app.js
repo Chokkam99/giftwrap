@@ -79,7 +79,14 @@
   }
 
   function approveProduct(product) {
-    sendMessage('I approve: ' + product.title + ' (id ' + product.id + ') at ' + product.price);
+    var price = formatPrice(product.price, product.currency);
+    sendMessage("I'd like the " + (product.title || 'gift') + ' for ' + price + '.', {
+      id: product.id,
+      title: product.title,
+      price: product.price,
+      store: product.merchant,
+      product_url: product.product_url,
+    });
   }
 
   function buildCard(card, index) {
@@ -173,6 +180,8 @@
   function appendShowMoreChip(group, row, startIndex) {
     var existing = group.querySelector('.show-more-chip');
     if (existing) existing.remove();
+    var existingStatus = group.querySelector('.pagination-status');
+    if (existingStatus) existingStatus.remove();
 
     var chip = document.createElement('button');
     chip.type = 'button';
@@ -194,15 +203,29 @@
           });
           if (data && data.has_more) {
             appendShowMoreChip(group, row, startIndex + products.length);
+          } else if (data && data.message) {
+            appendPaginationStatus(group, data.message);
+          } else if (!products.length) {
+            appendPaginationStatus(group, 'That’s everything we found for this search.');
           }
           scrollToBottom();
         })
         .catch(function () {
           chip.disabled = false;
-          chip.textContent = 'Show more like this';
+          chip.textContent = 'Couldn’t load more — try again';
+          appendPaginationStatus(group, 'We couldn’t load more options right now. Try again.');
         });
     });
     group.appendChild(chip);
+  }
+
+  function appendPaginationStatus(group, message) {
+    var existing = group.querySelector('.pagination-status');
+    if (existing) existing.remove();
+    var status = document.createElement('div');
+    status.className = 'pagination-status';
+    status.textContent = message;
+    group.appendChild(status);
   }
 
   function labeledRow(label, value) {
@@ -442,7 +465,7 @@
     sendBtn.disabled = disabled;
   }
 
-  function sendMessage(message) {
+  function sendMessage(message, selection) {
     var trimmed = (message || '').trim();
     if (!trimmed) return;
 
@@ -451,7 +474,7 @@
     setInputDisabled(true);
     setTyping(true);
 
-    fetchChat(trimmed)
+    fetchChat(trimmed, selection)
       .then(function (data) {
         setTyping(false);
         var group = addBubble('agent', data && data.reply ? data.reply : '');
@@ -470,14 +493,14 @@
       });
   }
 
-  function fetchChat(message) {
+  function fetchChat(message, selection) {
     if (isMock) {
-      return mockChat(message);
+      return mockChat(message, selection);
     }
     return fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation_id: conversationId, message: message }),
+      body: JSON.stringify({ conversation_id: conversationId, message: message, selection: selection || null }),
     }).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
@@ -489,25 +512,25 @@
   // exists. Covers all four render states by reacting to the message text:
   //   1. plain chat reply           -> anything not matched below
   //   2. product cards (+ budget)   -> message mentions a gift/occasion
-  //   3. approve_payment action     -> message starts with "I approve:"
+  //   3. approve_payment action     -> a structured card selection
   //      (sent automatically by the card's "Gift this" button)
   //   4. receipt action             -> message is "I completed the Prava approval"
   //      (sent automatically by the approval panel's confirm button)
 
   var mockShownCards = false;
 
-  function mockChat(message) {
+  function mockChat(message, selection) {
     return new Promise(function (resolve) {
       setTimeout(function () {
-        resolve(buildMockResponse(message));
+        resolve(buildMockResponse(message, selection));
       }, 600 + Math.random() * 500);
     });
   }
 
-  function buildMockResponse(message) {
+  function buildMockResponse(message, selection) {
     var lower = message.toLowerCase();
 
-    if (lower.indexOf('i approve:') === 0) {
+    if (selection || lower.indexOf('i approve:') === 0) {
       return {
         reply:
           "Great choice! I've started checkout with Prava — it's budget-locked and merchant-scoped, so nothing beyond what you approve can ever be charged.",
@@ -549,7 +572,7 @@
     if (!mockShownCards || /gift|mom|dad|birthday|anniversary|friend/.test(lower)) {
       mockShownCards = true;
       return {
-        reply: 'Here are a few gift ideas that fit a ₹3,000 budget:',
+        reply: 'I found a few options within ₹3,000.',
         budget: '3000',
         cards: [
           {

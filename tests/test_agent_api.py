@@ -123,6 +123,14 @@ def raw_tool_text(fake: FakeAnthropic) -> str:
     )
 
 
+def conversation_tool_result(conversation_id: str, tool_call_id: str) -> dict:
+    """Tool failures now stop before another model turn; inspect local history."""
+    for message in main.CONVERSATIONS[conversation_id].messages:
+        if message.tool_call_id == tool_call_id:
+            return {"payload": json.loads(message.content or "{}"), "is_error": message.is_error}
+    raise KeyError(tool_call_id)
+
+
 CONTEXT = ToolUse("set_gift_context", {"budget": "₹3,000", "recipient": "my sister"}, "t_ctx")
 
 
@@ -201,7 +209,55 @@ def test_search_populates_cards(client, monkeypatch):
     assert body["cards"] and len(body["cards"]) == 3
     assert all(card["stub"] for card in body["cards"])
     assert all(float(card["price"]) <= 3000 for card in body["cards"])
+    assert body["reply"] == "I found a few options within ₹3,000."
+    assert "gid://" not in body["reply"] and "[" not in body["reply"]
     assert tool_results(fake)["t_ctx"]["payload"]["budget"] == 3000.0
+
+
+def test_structured_card_selection_keeps_id_internal_and_safely_handles_disabled_payments(
+    client, monkeypatch
+):
+    conv = main.get_conversation("selected")
+    conv.budget = 100.0
+    conv.products["gid://shopify/Product/4433275322458"] = {
+        "id": "gid://shopify/Product/4433275322458", "title": "Gift Wrap",
+        "price": "50.00", "currency": "INR", "merchant": "demo.myshopify.com",
+        "product_url": "https://demo.myshopify.com/products/gift-wrap",
+    }
+    monkeypatch.setattr(main, "_load_prava", lambda: object())
+    monkeypatch.delenv("PRAVA_ALLOW_REAL", raising=False)
+
+    body = client.post("/chat", json={
+        "conversation_id": "selected", "message": "I'd like the Gift Wrap for ₹50.",
+        "selection": {"id": "gid://shopify/Product/4433275322458", "title": "Gift Wrap", "price": "50.00"},
+    }).json()
+
+    assert body["action"] is None
+    assert body["reply"] == "Payments are temporarily unavailable. Your selection is saved; please try again in a moment."
+    rendered = json.dumps(body)
+    for forbidden in ("gid://", "PRAVA_ALLOW_REAL", "server-side", "test environment", "card creation"):
+        assert forbidden not in rendered
+
+
+def test_show_more_appends_fresh_products_and_reports_terminal_state(client, monkeypatch):
+    conv = main.get_conversation("more")
+    conv.last_search = {
+        "query": "bracelet", "max_price": 2000.0, "stores": ["salty.co.in"],
+        "cursors": {"salty.co.in": "next"}, "shown_ids": {"already-shown"},
+    }
+    page = [
+        {"id": "already-shown", "title": "Old bracelet", "price": "1099.00"},
+        {"id": "salty-new", "title": "New bracelet", "price": "1299.00"},
+        {"id": "salty-new", "title": "New bracelet", "price": "1299.00"},
+    ]
+    monkeypatch.setattr(main, "_multi_store_search", lambda *args, **kwargs: (page, {}, False, {}))
+
+    body = client.post("/chat/more/more").json()
+    assert body == {
+        "products": [page[1]], "has_more": False,
+        "message": "That’s everything we found for this search.",
+    }
+    assert conv.last_search["shown_ids"] == {"already-shown", "salty-new"}
 
 
 def test_tools_blocked_until_context_is_set(client, monkeypatch):
@@ -211,7 +267,7 @@ def test_tools_blocked_until_context_is_set(client, monkeypatch):
         Response([Text("What is your budget?")]),
     )
     client.post("/chat", json={"conversation_id": "c3", "message": "find a gift"})
-    result = tool_results(fake)["t_early"]
+    result = conversation_tool_result("c3", "t_early")
     assert result["is_error"] is True
     assert "set_gift_context" in result["payload"]["error"]
 
@@ -232,7 +288,7 @@ def test_budget_guard_rejects_over_budget_mint(client, monkeypatch):
         "/chat", json={"conversation_id": "c4", "message": "buy the ₹5200 necklace"}
     ).json()
 
-    result = tool_results(fake)["t_mint"]
+    result = conversation_tool_result("c4", "t_mint")
     assert result["is_error"] is True
     assert result["payload"]["error"] == "budget_exceeded"
     assert result["payload"]["budget"] == 3000.0
@@ -343,7 +399,7 @@ def test_checkout_refuses_a_different_merchant(client, monkeypatch):
         Response([Text("I cannot use that card there.")]),
     )
     body = client.post("/chat", json={"conversation_id": "c7", "message": "buy elsewhere"}).json()
-    result = tool_results(fake)["t_wrong"]
+    result = conversation_tool_result("c7", "t_wrong")
     assert result["is_error"] is True
     assert result["payload"]["error"] == "merchant_scope"
     assert body["action"] is None
@@ -377,7 +433,7 @@ def test_checkout_requires_approval_first(client, monkeypatch):
         Response([Text("Please approve first.")]),
     )
     client.post("/chat", json={"conversation_id": "c8", "message": "just pay"})
-    result = tool_results(fake)["t_early_checkout"]
+    result = conversation_tool_result("c8", "t_early_checkout")
     assert result["is_error"] is True
     assert "not approved yet" in result["payload"]["error"]
 

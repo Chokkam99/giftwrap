@@ -118,9 +118,10 @@ Follow this flow:
 2. Find out who is picking the gift:
    * BUYER PICKS (the default — assume this unless told otherwise): search with
      `search_products`. Omit `store` to search every configured store at once
-     ({', '.join(UCP_STORES)}) concurrently, and tell the buyer which stores you searched. Present
-     2-3 options that are within budget, with prices and which store each is from, and ask the
-     buyer to pick one.
+     ({', '.join(UCP_STORES)}) concurrently. Product cards render automatically in the buyer UI:
+     after a successful search, reply with one short, natural sentence only (for example,
+     "I found a few options within your budget."). Do NOT repeat product titles, prices, IDs,
+     URLs, Markdown links, or a numbered list in your text.
    * RECIPIENT PICKS ("let them pick", "let her choose", "surprise them", etc.): call
      `create_gift_link` with a short warm note capturing the occasion/vibe, then give the buyer the
      returned link to share. Later, when the buyer asks whether the recipient has picked yet, call
@@ -136,8 +137,9 @@ Follow this flow:
    ready, call `complete_checkout` for the approved product and present the receipt (order id,
    amount, merchant) in plain language.
 
-The buyer's UI sends two LITERAL messages that are button presses, not free-form chat. Recognise
-them exactly:
+The buyer's UI can send a structured product selection with their natural confirmation. Treat that
+selection as the explicit approval for the exact product. The legacy literal message below may
+still arrive from an older UI; recognise it, but never echo its internal product ID.
   * "I approve: {{title}} (id {{id}}) at {{price}}" — the buyer pressed "Gift this" on that exact
     product card. This IS the explicit approval required by step 3. Do not search again and do not
     ask them to confirm a second time: call `mint_scoped_card` ONCE for that product, with
@@ -150,10 +152,11 @@ them exactly:
     `product_url`, then present the receipt.
 
 Rules: be warm and brief. Quote prices with the currency. Never invent products, order ids, or
-prices — only report what the tools returned. If a tool refuses (e.g. the budget guard), explain
-the refusal honestly to the buyer instead of retrying with different numbers. If a tool result
-carries "degraded": true or "stub": true, the live service was unreachable and the data is fake —
-say so plainly rather than presenting it as real.
+prices — only report what the tools returned. Never reveal implementation details, environment
+variables, internal flags, provider diagnostics, raw tool errors, or server setup steps. If a tool
+fails, do not invent a workaround or retry: the server will provide a safe buyer-facing message.
+If a tool result carries "degraded": true or "stub": true, the live service was unreachable and
+the data is fake — say so plainly rather than presenting it as real.
 You never see the card number; that is by design."""
 
 def _field(description: str = "", kind: str = "string") -> dict:
@@ -237,6 +240,9 @@ class Conversation:
     #                credential (server-only), txn_ref_id, polls, stub, completed}
     minted: dict[str, dict[str, Any]] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)  # product_url -> price
+    # Product cards most recently shown to this buyer. Kept server-side so a card
+    # click can submit an opaque product id without rendering or trusting it as prose.
+    products: dict[str, dict[str, Any]] = field(default_factory=dict)
     # "Show more like this" pagination state (WP-BROWSE). Set by the search tool,
     # consumed by POST /chat/{id}/more. None until the first real (non-stub) search.
     #   {query, max_price, stores, cursors: {store: cursor}, shown_ids: set[str]}
@@ -617,7 +623,17 @@ def _more_products(
         stores, query, max_price, cursors=cursors
     )
     products, _dropped = _within_budget(products, max_price)
-    fresh = [p for p in products if p.get("id") not in shown_ids]
+    # Some merchant pages repeat a product, including within one cursor page.
+    # Deduplicate both against already-rendered cards and this new batch.
+    seen_ids = set(shown_ids)
+    fresh: list[dict] = []
+    for product in products:
+        product_id = product.get("id")
+        if product_id and product_id in seen_ids:
+            continue
+        if product_id:
+            seen_ids.add(product_id)
+        fresh.append(product)
     room = max(0, cap - len(shown_ids))
     return fresh[:room], next_cursors
 
@@ -661,6 +677,8 @@ def _tool_search_products(conv: Conversation, args: dict) -> dict:
         price = _parse_amount(p.get("price"))
         if price is not None and p.get("product_url"):
             conv.prices[p["product_url"]] = price
+        if p.get("id"):
+            conv.products[p["id"]] = dict(p)
 
     result["count"] = len(products)
     result["products"] = products
@@ -767,6 +785,11 @@ def _minor_to_price(amount: Any) -> str | None:
         return f"{float(amount) / 100:.2f}"
     except (TypeError, ValueError):
         return None
+
+
+def _format_amount(amount: float, currency: str) -> str:
+    symbol = "₹" if currency == "INR" else f"{currency} "
+    return f"{symbol}{amount:,.0f}" if amount.is_integer() else f"{symbol}{amount:,.2f}"
 
 
 def _variant_label(variant: dict) -> str:
@@ -924,10 +947,11 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
         )
         return {
             "error": "real_prava_calls_disabled",
-            "message": (
-                "Refused: real Prava API calls are disabled (PRAVA_ALLOW_REAL is not "
-                "set to '1'). This guard exists to prevent accidental quota burn during "
-                "local testing. Set PRAVA_ALLOW_REAL=1 to allow a real mint."
+            # This is deliberately safe for the model too: it must not infer or
+            # explain server configuration to a buyer from a tool failure.
+            "user_message": (
+                "Payments are temporarily unavailable. Your selection is saved; "
+                "please try again in a moment."
             ),
         }
     if client is not None:
@@ -953,7 +977,15 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
             session = _fields(raw, ("session_id", "iframe_url", "expires_at"))
         except Exception as exc:
             degraded = _mark_degraded("prava", "create_session", exc)
-            session = None
+            return {
+                "error": "prava_session_failed",
+                "user_message": (
+                    "We couldn't start the payment approval. Nothing was charged. "
+                    "Please try again."
+                ),
+                # Diagnostics remain server-side; never put raw provider output
+                # into the tool result or buyer-facing response.
+            }
     if not session or not session.get("session_id"):
         stub = True
         sid = f"stub_sess_{uuid.uuid4().hex[:10]}"
@@ -1233,6 +1265,77 @@ def dispatch_tool(conv: Conversation, name: str, args: dict) -> dict:
 # ------------------------------------------------------------------- agent loop
 
 
+def _safe_tool_error_message(result: dict[str, Any]) -> str:
+    """Return buyer copy for a failed tool call, never its diagnostic payload."""
+    code = result.get("error") or ""
+    if result.get("user_message"):
+        return str(result["user_message"])
+    if code == "budget_exceeded":
+        return "That item is above your budget. Pick one of the options within your cap."
+    if code in {"merchant_scope", "invalid_merchant_url"}:
+        return "We couldn't start payment for that item. Nothing was charged. Please choose another option."
+    if code == "payment_failed":
+        return "We couldn't complete the payment. Nothing was charged. Please try again."
+    if code:
+        return "Something went wrong with that step. Nothing was charged. Please try again."
+    return "Something went wrong. Please try again."
+
+
+def _sanitize_buyer_reply(text: str) -> str:
+    """Defence in depth: internal product identifiers never belong in chat copy."""
+    text = re.sub(r"gid://[^\s)\]}]+", "", text or "")
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _short_search_reply(cards: list[dict], budget: float | None) -> str:
+    if not cards:
+        return "I couldn't find an option within that budget. Want to try a different search?"
+    if budget is None:
+        return "I found a few gift options for you."
+    return f"I found a few options within {_format_amount(budget, CURRENCY)}."
+
+
+def _selection_product(conv: Conversation, selection: "ProductSelection") -> dict[str, Any] | None:
+    """Look up a card server-side; client-provided title/price are display hints only."""
+    return conv.products.get(selection.id)
+
+
+def approve_selection_turn(conv: Conversation, selection: "ProductSelection") -> dict[str, Any]:
+    """Handle a card click without routing opaque product IDs through chat prose or an LLM."""
+    product = _selection_product(conv, selection)
+    if product is None:
+        return {
+            "reply": "That option is no longer available. Please choose one from the current results.",
+            "cards": None, "action": None,
+            "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
+            "has_more": False,
+        }
+
+    product_url = product.get("product_url") or ""
+    parsed = urlparse(product_url)
+    merchant_url = f"https://{parsed.netloc}" if parsed.netloc else f"https://{product.get('merchant', '')}"
+    result = _tool_mint_scoped_card(conv, {
+        "merchant_name": product.get("merchant") or "GiftWrap merchant",
+        "merchant_url": merchant_url,
+        "amount": product.get("price"),
+        "description": product.get("title") or "Gift",
+    })
+    if result.get("error"):
+        return {
+            "reply": _safe_tool_error_message(result), "cards": None, "action": None,
+            "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
+            "has_more": False,
+        }
+    return {
+        "reply": "Great choice. Approve the payment in the secure window to continue.",
+        "cards": None,
+        "action": {"type": "approve_payment", "iframe_url": result["iframe_url"],
+                   "session_id": result["session_id"]},
+        "budget": f"{conv.budget:.0f}" if conv.budget is not None else None,
+        "has_more": False,
+    }
+
+
 # The active LLM adapter (anthropic | openai | gemini, picked by $LLM_PROVIDER).
 # Built once and cached: the provider object is stateless, and its SDK client is
 # created lazily on the first real call.
@@ -1263,6 +1366,7 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
     cards: list[dict] = []
     action: dict | None = None
     has_more = False
+    safe_error: str | None = None
 
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
@@ -1306,8 +1410,24 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
                 tool_name=call.name,
                 is_error=bool(result.get("error")),
             ))
+            if result.get("error"):
+                # Never ask the model to explain a failed payment/catalog tool:
+                # its diagnostic details are not buyer-facing information.
+                safe_error = _safe_tool_error_message(result)
+                break
+        if safe_error:
+            break
 
-    reply = "\n\n".join(texts) or "I'm still working on that — could you say that again?"
+    if safe_error:
+        reply = safe_error
+    elif cards:
+        # Product cards are the product presentation. Do not duplicate their
+        # structured catalog data into a brittle Markdown list from the model.
+        reply = _short_search_reply(cards, conv.budget)
+    else:
+        reply = _sanitize_buyer_reply(
+            "\n\n".join(texts) or "I'm still working on that — could you say that again?"
+        )
     return {
         "reply": reply,
         "cards": cards or None,
@@ -1322,9 +1442,18 @@ def run_agent_turn(conv: Conversation, user_message: str) -> dict[str, Any]:
 # ------------------------------------------------------------------------- app
 
 
+class ProductSelection(BaseModel):
+    id: str
+    title: str | None = None
+    price: str | None = None
+    store: str | None = None
+    product_url: str | None = None
+
+
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
+    selection: ProductSelection | None = None
 
 
 class ChatResponse(BaseModel):
@@ -1414,7 +1543,13 @@ def index():
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     conv = get_conversation(req.conversation_id)
-    payload = run_agent_turn(conv, req.message)
+    # A card click carries its opaque ID separately; `message` stays natural
+    # buyer prose and is the only text the UI renders back into the chat.
+    if req.selection is not None:
+        conv.messages.append(Msg(role="user", content=req.message))
+        payload = approve_selection_turn(conv, req.selection)
+    else:
+        payload = run_agent_turn(conv, req.message)
     return ChatResponse(**payload)
 
 
@@ -1433,9 +1568,11 @@ def chat_more(conversation_id: str) -> dict:
     )
     ls["cursors"] = next_cursors
     ls["shown_ids"] |= {p["id"] for p in fresh if p.get("id")}
+    has_more = bool(next_cursors) and len(ls["shown_ids"]) < MAX_SHOWN_PRODUCTS
     return {
         "products": fresh,
-        "has_more": bool(next_cursors) and len(ls["shown_ids"]) < MAX_SHOWN_PRODUCTS,
+        "has_more": has_more,
+        "message": None if has_more else "That’s everything we found for this search.",
     }
 
 
