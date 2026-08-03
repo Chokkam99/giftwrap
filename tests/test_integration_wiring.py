@@ -12,6 +12,7 @@ by scripts/ucp_smoke.py, not from the test suite.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import create_autospec
@@ -27,8 +28,11 @@ from ucp import client as ucp_client  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(monkeypatch, tmp_path):
     main.CONVERSATIONS.clear()
+    # Mocked Prava sessions exercise the audit hooks too; isolate those records
+    # so running tests can never pollute the operator's real local audit file.
+    monkeypatch.setattr(main, "PRAVA_AUDIT_LOG_PATH", tmp_path / "prava-audit.jsonl")
     for name in main.MODULE_NAMES:
         main.MODULE_STATUS[name] = {
             "mode": "unknown", "detail": None, "degraded": False, "last_error": None
@@ -303,6 +307,51 @@ def test_mint_calls_create_session_with_every_required_argument(monkeypatch):
     assert conv.minted["sess_live_1"]["stub"] is False
 
 
+def test_real_session_audit_records_request_and_ids_without_credentials(tmp_path, monkeypatch):
+    """Operators can recover the support facts without preserving auth material."""
+    fake = create_autospec(prava_client.PravaClient, instance=True)
+    fake.create_session.return_value = session_obj()
+    monkeypatch.setattr(main, "_load_prava", lambda: fake)
+    audit_path = tmp_path / "prava-audit.jsonl"
+    monkeypatch.setattr(main, "PRAVA_AUDIT_LOG_PATH", audit_path)
+
+    result = main._tool_mint_scoped_card(conversation(), {
+        "merchant_name": GIVA_MERCHANT_NAME,
+        "merchant_url": GIVA_PRODUCT_URL,
+        "amount": "2400.00",
+        "description": "Silver earrings",
+    })
+
+    record = json.loads(audit_path.read_text(encoding="utf-8").strip())
+    assert record["event"] == "session_created"
+    assert record["session_id"] == "sess_live_1"
+    assert record["prava_order_id"] == "ord_1"
+    assert record["request_body"] == {
+        "user_id": main.BUYER_ID,
+        "user_email": main.BUYER_EMAIL,
+        "total_amount": "2400.00",
+        "currency": main.CURRENCY,
+        "integration_type": "full_checkout",
+        "purchase_context": [{
+            "merchant_details": {
+                "name": GIVA_MERCHANT_NAME,
+                "url": GIVA_MERCHANT_URL,
+                "country_code_iso2": "IN",
+            },
+            "product_details": [{
+                "description": "Silver earrings", "unit_price": "2400.00", "quantity": 1,
+            }],
+            "effective_until_minutes": 15,
+        }],
+        "description": "Silver earrings",
+    }
+    assert "order_id" not in result  # operational metadata never reaches the buyer action
+    contents = audit_path.read_text(encoding="utf-8")
+    for secret in ("tok_abc", "4111111111111111", "dynamic_cvv", "iframe_url"):
+        assert secret not in contents
+    assert audit_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_known_merchant_country_map_is_exact_and_a_salty_mint_uses_india(monkeypatch):
     assert main.merchant_country_for_url("https://salty.co.in/products/gift") == "IN"
     assert main.merchant_country_for_url("https://giva-jewelry.myshopify.com") == "IN"
@@ -360,7 +409,7 @@ def test_card_status_uses_timeout_seconds_not_timeout(monkeypatch):
     assert "stub" not in pending
 
 
-def test_terminal_prava_failure_preserves_the_provider_code_without_retrying(monkeypatch):
+def test_terminal_prava_failure_preserves_the_provider_code_without_retrying(tmp_path, monkeypatch):
     fake = create_autospec(prava_client.PravaClient, instance=True)
     fake.create_session.return_value = session_obj()
     failed = payment_result("sess_live_1", with_credential=False)
@@ -385,6 +434,18 @@ def test_terminal_prava_failure_preserves_the_provider_code_without_retrying(mon
     assert "Request failed with status code 400" in status["message"]
     assert again == status
     assert fake.wait_for_result.call_count == 1
+    audit_records = [
+        json.loads(line)
+        for line in (tmp_path / "prava-audit.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert audit_records[-1] == {
+        "at": audit_records[-1]["at"],
+        "event": "payment_terminal_failed",
+        "session_id": "sess_live_1",
+        "prava_order_id": "ord_1",
+        "merchant_url": GIVA_MERCHANT_URL,
+        "error": status["message"],
+    }
 
 
 def test_approved_credential_is_captured_but_never_returned(monkeypatch):

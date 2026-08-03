@@ -103,6 +103,13 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 GIFT_HTML = STATIC_DIR / "gift.html"
+# Local operator-only diagnostics for real Prava attempts. This path is
+# deliberately gitignored: it can contain a buyer email plus session/order IDs.
+# It must never contain credentials, API keys, auth-bearing approval URLs, or
+# raw provider responses.
+PRAVA_AUDIT_LOG_PATH = Path(
+    os.getenv("PRAVA_AUDIT_LOG_PATH", str(BASE_DIR / ".local" / "prava-audit.jsonl"))
+)
 
 PRODUCT_FIELDS = (
     "id", "title", "price", "currency", "image_url",
@@ -426,6 +433,72 @@ def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
     if isinstance(obj, dict):
         return {n: obj.get(n) for n in names}
     return {n: getattr(obj, n, None) for n in names}
+
+
+def _prava_session_request_body(
+    *,
+    merchant_name: str,
+    merchant_url: str,
+    merchant_country: str,
+    amount: str,
+    description: str,
+) -> dict[str, Any]:
+    """Return the exact non-secret body Prava receives for a session mint.
+
+    Keeping this explicit makes a failed sandbox request diagnosable after the
+    fact, without ever retaining the approval URL or the later card credential.
+    """
+    return {
+        "user_id": BUYER_ID,
+        "user_email": BUYER_EMAIL,
+        "total_amount": amount,
+        "currency": CURRENCY,
+        "integration_type": "full_checkout",
+        "purchase_context": [{
+            "merchant_details": {
+                "name": merchant_name,
+                "url": merchant_url,
+                "country_code_iso2": merchant_country,
+            },
+            "product_details": [{
+                "description": description,
+                "unit_price": amount,
+                "quantity": 1,
+            }],
+            "effective_until_minutes": 15,
+        }],
+        "description": description,
+    }
+
+
+def _write_prava_audit(event: str, **fields: Any) -> None:
+    """Append a sanitized local-only Prava diagnostic event.
+
+    This is intentionally a narrow structured logger, rather than a generic
+    response dump: raw session responses include an auth-bearing iframe URL and
+    payment responses include one-time credentials. The file is created owner-
+    readable only and its directory is gitignored.
+    """
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": event,
+        **fields,
+    }
+    fd = -1
+    try:
+        PRAVA_AUDIT_LOG_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(PRAVA_AUDIT_LOG_PATH, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as stream:
+            # The stream owns and closes the descriptor from this point.
+            fd = -1
+            stream.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    except OSError as exc:
+        # Diagnostics must never make an otherwise valid payment session fail.
+        log.warning("could not write local Prava audit log: %s", exc)
+    finally:
+        if fd != -1:
+            os.close(fd)
 
 
 def _parse_amount(value: Any) -> float | None:
@@ -1112,7 +1185,16 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
             "user_message": "We couldn't start the payment approval. Nothing was charged. Please try again.",
         }
 
+    request_body = _prava_session_request_body(
+        merchant_name=merchant_name,
+        merchant_url=merchant_url,
+        merchant_country=merchant_country,
+        amount=amount_str,
+        description=description,
+    )
+
     session: dict[str, Any] | None = None
+    prava_order_id: str | None = None
     stub = False
     degraded: str | None = None
     client = _load_prava()
@@ -1155,12 +1237,22 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
                 ],
                 description=description,
             )
-            session = _fields(raw, ("session_id", "iframe_url", "expires_at"))
+            session_fields = _fields(raw, ("session_id", "iframe_url", "expires_at", "order_id"))
+            session = {
+                key: session_fields.get(key)
+                for key in ("session_id", "iframe_url", "expires_at")
+            }
+            prava_order_id = session_fields.get("order_id")
         except Exception as exc:
             degraded = _mark_degraded("prava", "create_session", exc)
             error_code = getattr(exc, "code", None)
             error_message = getattr(exc, "message", None)
             detail = ": ".join(str(part) for part in (error_code, error_message) if part)
+            _write_prava_audit(
+                "session_create_failed",
+                request_body=request_body,
+                error=_exc_detail(exc),
+            )
             return {
                 "error": "prava_session_failed",
                 "user_message": (
@@ -1189,7 +1281,16 @@ def _tool_mint_scoped_card(conv: Conversation, args: dict) -> dict:
         "expires_at": session["expires_at"], "credential": None,
         "txn_ref_id": None, "polls": 0, "stub": stub, "completed": False,
         "failed": False, "failed_reason": None,
+        "prava_order_id": prava_order_id,
     }
+    if not stub:
+        _write_prava_audit(
+            "session_created",
+            request_body=request_body,
+            session_id=session["session_id"],
+            prava_order_id=prava_order_id,
+            expires_at=session["expires_at"],
+        )
     log.info("minted scoped card session=%s amount=%.2f stub=%s",
              session["session_id"], amount, stub)
     result = dict(session)
@@ -1256,6 +1357,13 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
                     reason = _prava_failure_reason(result)
                     record["failed"] = True
                     record["failed_reason"] = reason
+                    _write_prava_audit(
+                        "payment_terminal_failed",
+                        session_id=session_id,
+                        prava_order_id=record.get("prava_order_id"),
+                        merchant_url=record["merchant_url"],
+                        error=reason,
+                    )
                     log.warning("prava session=%s terminal failure: %s", session_id, reason)
                     return {
                         "status": "failed", "ready": False, "terminal": True,
@@ -1275,6 +1383,13 @@ def _tool_get_card_status(conv: Conversation, args: dict) -> dict:
         # Server-side only. Never returned to the model, never logged.
         record["credential"] = credential
         record["txn_ref_id"] = credential.get("txn_ref_id")
+        if not record["stub"]:
+            _write_prava_audit(
+                "payment_approved",
+                session_id=session_id,
+                prava_order_id=record.get("prava_order_id"),
+                txn_ref_id=record["txn_ref_id"],
+            )
         log.info("credential received for session=%s (not logged)", session_id)
         return {"status": "approved", "ready": True, "txn_ref_id": record["txn_ref_id"],
                 **({"stub": True} if record["stub"] else {})}
@@ -1379,12 +1494,39 @@ def _tool_complete_checkout(conv: Conversation, args: dict) -> dict:
             record["prava_report_status"] = {
                 "state": "failed", "error": _exc_detail(exc),
             }
+            if not record.get("stub", False):
+                _write_prava_audit(
+                    "checkout_status_report_failed",
+                    session_id=session_id,
+                    prava_order_id=record.get("prava_order_id"),
+                    checkout_order_id=outcome.get("order_id"),
+                    checkout_status=outcome.get("status"),
+                    error=_exc_detail(exc),
+                )
             log.warning("Prava status report failed after checkout session=%s: %s", session_id, exc)
         else:
             record["prava_report_status"] = {"state": "reported"}
+            if not record.get("stub", False):
+                _write_prava_audit(
+                    "checkout_status_reported",
+                    session_id=session_id,
+                    prava_order_id=record.get("prava_order_id"),
+                    checkout_order_id=outcome.get("order_id"),
+                    checkout_status=outcome.get("status"),
+                )
 
     record["completed"] = True
     record["credential"] = None  # burn the one-time credential
+    if not record.get("stub", False):
+        _write_prava_audit(
+            "checkout_finished",
+            session_id=session_id,
+            prava_order_id=record.get("prava_order_id"),
+            checkout_order_id=outcome.get("order_id"),
+            checkout_status=outcome.get("status"),
+            checkout_success=bool(outcome.get("success")),
+            merchant_url=record["merchant_url"],
+        )
     log.info("checkout session=%s success=%s order=%s",
              session_id, outcome.get("success"), outcome.get("order_id"))
     outcome["amount"] = f"{record['amount']:.2f}"

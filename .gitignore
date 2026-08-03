@@ -22,5 +22,10 @@ test-results/
 # Logs
 *.log
 
+# Local-only operator diagnostics. Prava audit records may contain a buyer
+# email and provider session/order identifiers, so they must never be shared
+# through git or a public deployment.
+.local/
+
 # Pytest
 .pytest_cache/
